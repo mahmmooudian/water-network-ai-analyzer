@@ -1,7 +1,15 @@
 # 💧 Water Network AI Analyzer
 
-> An AI-powered analytics platform for predictive modeling, PRV optimization, and intelligent analysis of water distribution networks using XGBoost and Particle Swarm Optimization.
+<div align="center">
 
+# 💧 Water Network AI Analyzer
+
+### Industrial AI System for Water Distribution Intelligence & Optimization
+
+A machine learning-driven engineering platform for **pressure prediction, PRV optimization, and operational intelligence in water distribution networks**.
+
+
+**Industrial AI · Water Infrastructure Optimization · Predictive Modeling · Engineering Decision Systems**
 ---
 
 ## 📌 Overview
