@@ -4,496 +4,221 @@
 
 ### Industrial AI System for Water Distribution Intelligence & Optimization
 
-A machine learning-driven engineering platform for **pressure prediction, PRV optimization, and operational intelligence in water distribution networks**.
+An AI-driven engineering analytics platform for modeling pressure behavior, optimizing PRV configurations, and supporting decision-making in water distribution networks.
 
 <br>
 
-**Industrial AI · Water Infrastructure Optimization · Predictive Modeling · Engineering Decision Systems**
-
-<br>
+**Machine Learning · Optimization Systems · Water Infrastructure AI · Engineering Analytics**
 
 </div>
+
 ---
 
 ## 📌 Overview
 
-**Water Network AI Analyzer** is a desktop-based intelligent analytics platform designed to support the analysis and optimization of water distribution network data.
+Water Network AI Analyzer is a desktop-based AI system designed for intelligent analysis and optimization of water distribution networks.
 
-The project combines **Machine Learning**, **Particle Swarm Optimization (PSO)**, data preprocessing, predictive analytics, and interactive visualization within a unified graphical environment.
+The system integrates machine learning, optimization algorithms, and data processing pipelines to model pressure behavior and evaluate PRV (Pressure Reducing Valve) configurations under operational constraints.
 
-The system is designed to process operational water network datasets, analyze pressure-related variables, predict critical-point behavior, and optimize Pressure Reducing Valve (**PRV**) settings across a 24-hour operational period.
-
-The primary objective of this project is to explore how AI-driven analytical methods can support data-informed pressure management and intelligent decision-making in water distribution systems.
+The goal of this project is to explore how AI techniques can support infrastructure-level decision-making in complex hydraulic systems.
 
 ---
 
 ## 🎯 Problem Statement
 
-Water distribution networks generate complex operational data involving pressure, demand, valve settings, and critical network points.
+Water distribution networks are complex dynamic systems where pressure behavior is influenced by interconnected variables such as demand, valve configurations, and network topology.
 
-Analyzing these variables manually can be difficult, particularly when multiple network components interact over time.
+Traditional analysis methods are often limited by:
 
-This project addresses the problem by developing an integrated analytical workflow capable of:
+- High system complexity
+- Nonlinear relationships between variables
+- Time-dependent operational changes
+- Manual PRV tuning processes
 
-* Processing structured water network data
-* Identifying relevant PRV and pressure variables
-* Predicting network behavior using machine learning
-* Optimizing PRV settings using metaheuristic optimization
-* Analyzing critical-point pressure behavior
-* Visualizing operational and model outputs
-* Exporting analytical results for further engineering evaluation
+This project addresses these challenges by introducing an AI-based framework capable of:
 
----
-
-## ✨ Key Features
-
-### 🧠 Machine Learning-Based Prediction
-
-The system integrates **XGBoost regression models** for predictive analysis of water network variables.
-
-The machine learning pipeline includes:
-
-* Feature standardization
-* Training and testing data separation
-* Randomized hyperparameter search
-* Multi-output regression support
-* Model performance evaluation
-* Critical-point pressure prediction
-
-Supported evaluation metrics include:
-
-* Mean Absolute Error (**MAE**)
-* Root Mean Squared Error (**RMSE**)
-* R-squared (**R²**)
-* Mean Absolute Percentage Error (**MAPE**)
+- Learning nonlinear pressure behavior patterns
+- Predicting critical network conditions
+- Optimizing PRV configurations under constraints
+- Supporting sequential decision-making over time
 
 ---
 
-### ⚙️ Particle Swarm Optimization
+## ⚙️ Core Capabilities
 
-A custom **Particle Swarm Optimization (PSO)** implementation is used to explore optimized PRV operating settings.
+### Machine Learning System
+- XGBoost-based regression modeling
+- Multi-output prediction for critical points
+- Automated hyperparameter tuning (RandomizedSearchCV)
+- Robust preprocessing pipeline
 
-The optimization process includes:
+### Optimization System
+- Particle Swarm Optimization (PSO)
+- Constraint-based PRV optimization
+- Stability-aware sequential decision modeling
+- 24-hour operational optimization workflow
 
-* Particle initialization within PRV operating constraints
-* Velocity control
-* Dynamic inertia weight adjustment
-* Adaptive cognitive and social coefficients
-* Personal-best and global-best tracking
-* Pressure constraint penalties
-* Inter-hour PRV stability penalties
-* Convergence history monitoring
+### Data Intelligence Layer
+- Automatic schema detection from raw CSV data
+- Missing value handling (KNN Imputation)
+- Outlier filtering (IQR method)
+- Feature scaling and transformation
 
-The optimization workflow is executed across a **24-hour operating horizon**.
-
----
-
-### 💧 PRV Pressure Management
-
-The platform supports intelligent analysis of **Pressure Reducing Valve (PRV)** data.
-
-The optimization objective considers:
-
-* Minimum pressure constraints
-* Maximum pressure constraints
-* PRV operating limits
-* Pressure stability
-* Changes between consecutive PRV settings
-
-This enables the system to investigate more stable and operationally constrained valve configurations.
+### Decision Support System
+- Pressure prediction for network nodes
+- Critical-point estimation
+- PRV configuration evaluation
+- Analytical reporting and visualization
 
 ---
 
-### 📊 Advanced Data Preprocessing
-
-The preprocessing pipeline includes:
-
-* CSV data validation
-* Automatic water network column identification
-* Numeric data conversion
-* Missing-value handling using **KNN Imputation**
-* Interquartile Range (**IQR**) based outlier filtering
-* Feature scaling using **StandardScaler**
-* Structured separation of network variables
-
-The application automatically identifies:
-
-* PRV variables
-* Critical points
-* Points after valves
-* Deby / flow-related data
-
----
-
-### 🔬 Critical Point Prediction
-
-The platform uses machine learning to model pressure behavior at critical network points.
-
-Point-after-valve measurements and flow-related variables can be used as model inputs to estimate critical-point pressure values.
-
-The system also supports **multi-output regression**, allowing multiple critical points to be predicted within a unified modeling workflow.
-
----
-
-### 📈 Interactive Data Visualization
-
-The application provides multiple analytical visualization tools, including:
-
-* Data distribution boxplots
-* Actual vs. predicted scatter plots
-* Regression visualization
-* Multi-series pressure plots
-* Simulated vs. predicted comparison plots
-* Pressure heatmaps
-* PSO convergence plots
-* Feature importance visualization
-
-Plots can be viewed directly inside the application and exported for further analysis.
-
----
-
-### 🖥️ Desktop Graphical User Interface
-
-The project includes a desktop GUI developed using **Tkinter**.
-
-The interface provides access to:
-
-* CSV data loading
-* Data visualization
-* Searchable network data tables
-* Interactive cell editing
-* Data restoration
-* Deby data extraction
-* Point-after-valve analysis
-* Pressure prediction
-* XGBoost model training
-* Critical-point prediction
-* PSO optimization
-* Simulation workflow
-* CSV result export
-
-The GUI is designed to provide a unified environment for analytical and experimental workflows.
-
----
-
-### 📁 INP File Generation
-
-The system includes an INP generation component for creating structured water network configuration files.
-
-Generated files may include:
-
-* Junction definitions
-* Reservoir configuration
-* Pipe definitions
-* PRV definitions
-* Demand patterns
-* PRV patterns
-* Control definitions
-* Hydraulic options
-* Simulation timing configuration
-
-This component provides a foundation for future integration with dedicated hydraulic simulation engines.
-
----
-
-## 🏗️ System Architecture
-
-The application follows a modular object-oriented design.
+## 🧠 System Architecture
 
 ```text
-Water Network Data
+Raw Water Network Data
         │
         ▼
-Data Validation
+Data Validation & Cleaning
         │
         ▼
-Data Preprocessing
+Preprocessing Layer
  ├── KNN Imputation
- ├── Numeric Conversion
- └── IQR Outlier Filtering
+ ├── IQR Outlier Removal
+ └── Feature Scaling
         │
         ▼
-Feature Preparation
+Machine Learning Layer
+ ├── XGBoost Regression
+ ├── Multi-Output Learning
+ └── Hyperparameter Optimization
         │
-        ├───────────────────────┐
-        │                       │
-        ▼                       ▼
- XGBoost Modeling         PSO Optimization
-        │                       │
-        ▼                       ▼
-Pressure Prediction       PRV Setting Search
-        │                       │
-        └───────────┬───────────┘
-                    │
-                    ▼
-          Critical Point Analysis
-                    │
-                    ▼
-        Visualization & Reporting
-                    │
-                    ▼
-            CSV / INP Export
+        ▼
+Optimization Layer
+ ├── Particle Swarm Optimization
+ ├── PRV Constraint Handling
+ └── 24-Hour Sequential Optimization
+        │
+        ▼
+Decision Layer
+ ├── Pressure Prediction
+ ├── Critical Point Analysis
+ └── PRV Strategy Evaluation
+        │
+        ▼
+Output Layer
+ ├── Visualization
+ ├── Reports
+ └── Data Export (CSV / INP)
 ```
 
 ---
 
-## 🧩 Core Components
+## 📊 Machine Learning Pipeline
 
-| Component                   | Responsibility                            |
-| --------------------------- | ----------------------------------------- |
-| `WaterNetworkData`          | Structured container for network datasets |
-| `WaterNetworkDataProcessor` | Data validation and preprocessing         |
-| `XGBoostTrainer`            | Model training, tuning, and prediction    |
-| `PSOOptimizer`              | PRV setting optimization                  |
-| `PlotGenerator`             | Analytical visualization                  |
-| `FileHandler`               | CSV input and output operations           |
-| `SimpleSimulator`           | Simplified pressure simulation layer      |
-| `INPGenerator`              | Water network INP file generation         |
-| `WaterNetworkGUI`           | Main desktop application interface        |
+Raw Data → Validation → KNN Imputation → IQR Outlier Removal → Scaling → Train/Test Split → XGBoost → Optimization → Evaluation → Prediction
+
+### Metrics
+- MAE
+- RMSE
+- R² Score
 
 ---
 
-## 🤖 Machine Learning Workflow
+## ⚡ Optimization System (PSO)
 
-The XGBoost modeling pipeline follows the workflow below:
-
-```text
-Raw Network Data
-        ↓
-Data Validation
-        ↓
-Missing Value Imputation
-        ↓
-Outlier Filtering
-        ↓
-Feature Scaling
-        ↓
-Train / Test Split
-        ↓
-Randomized Hyperparameter Search
-        ↓
-XGBoost Training
-        ↓
-Model Evaluation
-        ↓
-Pressure Prediction
-```
-
-Hyperparameter tuning explores combinations of:
-
-* Number of estimators
-* Maximum tree depth
-* Learning rate
-* Subsample ratio
-* Column sampling ratio
-
-The implementation also supports `MultiOutputRegressor` for multi-target critical-point prediction.
+- Particle Swarm Optimization for PRV tuning
+- Pressure constraint penalties
+- Stability penalty across time steps
+- Sequential 24-hour optimization
 
 ---
 
-## ⚡ PSO Optimization Workflow
+## 🧹 Data Processing
 
-The PSO algorithm searches for PRV configurations within predefined operating limits.
-
-```text
-Initialize Particle Population
-            ↓
-Initialize Particle Velocities
-            ↓
-Evaluate Pressure Penalty
-            ↓
-Update Personal Best
-            ↓
-Update Global Best
-            ↓
-Adjust Inertia Weight
-            ↓
-Update Cognitive / Social Terms
-            ↓
-Update Velocity
-            ↓
-Update PRV Settings
-            ↓
-Apply Operating Constraints
-            ↓
-Repeat Until Maximum Iterations
-```
-
-The objective function considers pressure constraint violations and PRV setting stability between consecutive operating periods.
+- KNN Imputation for missing values
+- IQR-based outlier filtering
+- StandardScaler normalization
+- Automatic detection of PRV / J-* / -B / P-676 columns
 
 ---
 
-## 🛠️ Technologies
+## 🖥️ Desktop Application
 
-### Programming
-
-* Python
-
-### Machine Learning
-
-* XGBoost
-* Scikit-learn
-* Multi-output Regression
-* Randomized Hyperparameter Search
-
-### Data Processing
-
-* Pandas
-* NumPy
-* KNN Imputation
-* IQR-Based Outlier Detection
-
-### Optimization
-
-* Particle Swarm Optimization
-
-### Visualization
-
-* Matplotlib
-* Seaborn
-
-### User Interface
-
-* Tkinter
-* ttk
+- Dataset loader
+- Interactive table view
+- Model training panel
+- Prediction module
+- PSO optimization module
+- Visualization dashboard
 
 ---
 
-## 📂 Expected Data Structure
+## 📁 Project Structure
 
-The application expects a CSV dataset containing water network operational variables.
-
-Column categories are identified using naming conventions.
-
-| Data Type            | Expected Naming Pattern        |
-| -------------------- | ------------------------------ |
-| PRV                  | Column name containing `PRV`   |
-| Critical Point       | Column name starting with `J-` |
-| Point After Valve    | Column name ending with `-B`   |
-| Deby / Flow Variable | `P-676`                        |
-
-The dataset must contain at least **24 rows** for the 24-hour analytical workflow.
-
-> Dataset naming conventions may be adapted in future versions through configurable schema mapping.
+water-network-ai-analyzer/
+├── main.py
+├── requirements.txt
+├── README.md
+├── LICENSE
+├── .gitignore
+├── data/
+├── docs/
+└── results/
 
 ---
 
 ## 🚀 Installation
 
-Clone the repository:
-
-```bash
-git clone https://github.com/YOUR-USERNAME/water-network-ai-analyzer.git
-```
-
-Navigate to the project directory:
-
-```bash
-cd water-network-ai-analyzer
-```
-
-Create a virtual environment:
-
-```bash
-python -m venv .venv
-```
-
-Activate the environment on Windows:
-
-```bash
-.venv\Scripts\activate
-```
-
-Install the required dependencies:
-
-```bash
-pip install -r requirements.txt
-```
+git clone https://github.com/mahmmooudian/water-network-ai-analyzer.git  
+cd water-network-ai-analyzer  
+python -m venv .venv  
+.venv\Scripts\activate  
+pip install -r requirements.txt  
 
 ---
 
-## ▶️ Running the Application
+## ▶️ Usage
 
-Run the main Python application:
-
-```bash
 python main.py
-```
 
-The Water Network Analyzer graphical interface will open automatically.
-
----
-
-## 📊 Application Workflow
-
-1. Load a compatible CSV water network dataset.
-2. Allow the application to validate and preprocess the data.
-3. Explore PRV, critical-point, point-after-valve, and Deby variables.
-4. Analyze point-after-valve distributions.
-5. Train the XGBoost predictive model.
-6. Evaluate model performance.
-7. Predict critical-point pressure behavior.
-8. Run PSO-based PRV optimization.
-9. Review optimization metrics and convergence behavior.
-10. Export analytical results or generated INP files.
+Steps:
+1. Load dataset  
+2. Preprocess data  
+3. Train model  
+4. Run prediction  
+5. Optimize PRV  
+6. Analyze results  
 
 ---
 
-## ⚠️ Current Simulation Scope
+## ⚠️ Limitations
 
-The current version includes a **simplified pressure simulation layer** for analytical demonstration and workflow validation.
-
-It should not be interpreted as a replacement for a full hydraulic solver.
-
-The INP generation module provides a foundation for future integration with hydraulic simulation frameworks such as EPANET or WNTR.
-
-Future versions are intended to connect the optimization workflow directly to a dedicated hydraulic simulation engine.
+- Simplified hydraulic simulation
+- No full EPANET integration
+- Limited real-world validation
+- No real-time sensor input
 
 ---
 
-## 🔮 Future Development
+## 🔮 Roadmap
 
-Planned improvements include:
-
-* Direct EPANET / WNTR integration
-* Physics-informed optimization objectives
-* Network topology-aware modeling
-* Time-series validation strategies
-* Advanced anomaly detection
-* Leak detection workflows
-* Model persistence and experiment tracking
-* Automated MLOps pipelines
-* Web-based analytical dashboard
-* Real-time sensor data integration
-* Configurable network schema mapping
-* Advanced multi-objective optimization
-
----
-
-## 🎯 Project Motivation
-
-This project was developed to investigate the practical application of **Artificial Intelligence and optimization algorithms in water infrastructure systems**.
-
-The broader goal is to explore how machine learning, operational data, and intelligent optimization can support more efficient and data-informed management of complex engineering infrastructure.
+- EPANET / WNTR integration
+- Real-time monitoring
+- Leak detection models
+- Web dashboard
+- Time-series modeling
 
 ---
 
 ## 👨‍💻 Author
 
-**Amir Mohammad Mahmoudian**
-
-AI/ML Developer focused on Machine Learning, Deep Learning, Computer Vision, Industrial AI, and intelligent engineering systems.
+Amir Mohammad Mahmoudian  
+GitHub: @mahmmooudian  
+LinkedIn: amirmohmmadmahmoudian  
+Email: mahmmooudian@gmail.com  
 
 ---
 
 ## 📄 License
 
-This project is licensed under the **MIT License**.
-
----
-
-## ⭐ Support
-
-If you find this project interesting, consider giving the repository a star.
-
-Contributions, technical discussions, and research collaborations are welcome.
+MIT License
