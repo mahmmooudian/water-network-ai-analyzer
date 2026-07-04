@@ -1,5 +1,3 @@
-# 💧 Water Network AI Analyzer
-
 <div align="center">
 
 # 💧 Water Network AI Analyzer
@@ -8,8 +6,13 @@
 
 A machine learning-driven engineering platform for **pressure prediction, PRV optimization, and operational intelligence in water distribution networks**.
 
+<br>
 
 **Industrial AI · Water Infrastructure Optimization · Predictive Modeling · Engineering Decision Systems**
+
+<br>
+
+</div>
 ---
 
 ## 📌 Overview
