@@ -1,2559 +1,1925 @@
-"""
-Water Network Analyzer - Professional Edition v4.0
-A comprehensive application for water network analysis using machine learning, 
-PSO optimization, and hydraulic simulation.
-"""
+from __future__ import annotations
 
+import json
+import logging
+import math
 import os
 import sys
-import logging
-from typing import Dict, List, Tuple, Optional, Any, Union, ClassVar
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+
+import joblib
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import xgboost as xgb
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, font, simpledialog
-from sklearn.preprocessing import StandardScaler, RobustScaler
-from sklearn.model_selection import train_test_split, RandomizedSearchCV
-from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
-from sklearn.impute import KNNImputer
-from sklearn.multioutput import MultiOutputRegressor
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
+import xgboost as xgb
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-import seaborn as sns
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.impute import KNNImputer
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import KFold, RandomizedSearchCV, train_test_split
+from sklearn.multioutput import MultiOutputRegressor
+from sklearn.pipeline import Pipeline
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
-# Configure logging
+try:
+    import wntr  # Optional dependency for real EPANET/WNTR simulation.
+except Exception:  # pragma: no cover - optional dependency
+    wntr = None
+
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+
+LOG_FILE = "water_network_analyzer.log"
 logging.basicConfig(
-    level=logging.INFO,   
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('water_network_analyzer.log'),
-        logging.StreamHandler()
-    ]
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"), logging.StreamHandler()],
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("water-network-ai-analyzer")
 
-# Constants with validation
+
+# -----------------------------------------------------------------------------
+# Configuration and data containers
+# -----------------------------------------------------------------------------
+
 @dataclass(frozen=True)
-class Constants:
-    """Application constants with validation"""
-    MIN_PRESSURE: float = 10.0
-    MAX_PRESSURE: float = 60.0
-    MIN_PRV: float = 10.0
-    MAX_PRV: float = 60.0
-    NUM_HOURS: int = 24
-    MAX_SAMPLES_FOR_TRAINING: int = 10000
-    RANDOM_STATE: int = 42
-    TEST_SIZE: float = 0.2
-    N_NEIGHBORS_IMPUTER: int = 5
-    OUTLIER_THRESHOLD: float = 1.5
-    
-    PSO_PARAMS: ClassVar[Dict[str, Union[int, float]]] = {
-        "num_particles": 30,
-        "max_iterations": 50,
-        "w_max": 0.9,
-        "w_min": 0.4,
-        "c1": 2.0,
-        "c2": 2.0
-    }
-    
-    XGBOOST_PARAMS: ClassVar[Dict[str, Any]] = {
-        'n_estimators': [50, 100, 150],
-        'max_depth': [3, 5, 7],
-        'learning_rate': [0.01, 0.1, 0.2],
-        'subsample': [0.8, 1.0],
-        'colsample_bytree': [0.8, 1.0]
-    }
-    
-    # Hydraulic parameters
-    DEFAULT_ELEVATION: float = 100.0
-    DEFAULT_BASE_DEMAND: float = 0.01
-    DEFAULT_RESERVOIR_HEAD: float = 150.0
-    DEFAULT_PIPE_LENGTH: float = 1000.0
-    DEFAULT_PIPE_DIAMETER: float = 0.3
-    DEFAULT_PIPE_ROUGHNESS: float = 100.0
+class AppConfig:
+    """Central configuration for ML, PSO, and UI behavior."""
 
-# Data Models
+    random_state: int = 42
+    test_size: float = 0.20
+    min_training_rows: int = 12
+    max_training_rows: int = 50_000
+    knn_neighbors: int = 5
+    iqr_factor: float = 1.5
+    cv_folds: int = 5
+    search_iterations: int = 14
+
+    min_pressure: float = 10.0
+    max_pressure: float = 60.0
+    target_pressure: float = 30.0
+    min_prv: float = 10.0
+    max_prv: float = 60.0
+    optimization_hours: int = 24
+
+    pso_particles: int = 36
+    pso_iterations: int = 70
+    pso_w_max: float = 0.90
+    pso_w_min: float = 0.40
+    pso_c1: float = 1.7
+    pso_c2: float = 1.9
+    pso_velocity_fraction: float = 0.20
+
+    pressure_violation_weight: float = 50.0
+    pressure_target_weight: float = 0.15
+    stability_weight: float = 0.10
+    reference_weight: float = 0.03
+
+
+@dataclass
+class Schema:
+    """Detected semantic groups in a water-network CSV."""
+
+    prv_columns: List[str] = field(default_factory=list)
+    point_after_valve_columns: List[str] = field(default_factory=list)
+    critical_point_columns: List[str] = field(default_factory=list)
+    demand_column: Optional[str] = None
+    ignored_columns: List[str] = field(default_factory=list)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "prv_columns": self.prv_columns,
+            "point_after_valve_columns": self.point_after_valve_columns,
+            "critical_point_columns": self.critical_point_columns,
+            "demand_column": self.demand_column,
+            "ignored_columns": self.ignored_columns,
+        }
+
+
 @dataclass
 class WaterNetworkData:
-    """Data model for water network information"""
-    prv_data: pd.DataFrame
-    critical_point_data: pd.DataFrame
-    point_after_valve_data: pd.DataFrame
-    deby_data: pd.DataFrame
-    original_data: Dict[str, pd.DataFrame]
-    
-    def validate(self) -> bool:
-        """Validate the data structure"""
-        required_keys = ['PRV', 'Critical Point', 'Point After Valve', 'Deby']
-        for key in required_keys:
-            if key not in self.original_data or self.original_data[key].empty:
-                logger.error(f"Missing required data: {key}")
-                return False
-        return True
+    """Raw data plus detected schema."""
+
+    raw: pd.DataFrame
+    schema: Schema
+    source_path: Optional[Path] = None
+
+    @property
+    def prv_data(self) -> pd.DataFrame:
+        return self.raw.loc[:, self.schema.prv_columns].copy()
+
+    @property
+    def point_after_valve_data(self) -> pd.DataFrame:
+        return self.raw.loc[:, self.schema.point_after_valve_columns].copy()
+
+    @property
+    def critical_point_data(self) -> pd.DataFrame:
+        return self.raw.loc[:, self.schema.critical_point_columns].copy()
+
+    @property
+    def demand_data(self) -> pd.DataFrame:
+        if not self.schema.demand_column:
+            return pd.DataFrame(index=self.raw.index)
+        return self.raw.loc[:, [self.schema.demand_column]].copy()
+
 
 @dataclass
-class ModelResults:
-    """Container for model results"""
-    model: Any
-    scaler: Any
-    predictions: Dict[str, Any]
+class RegressionResult:
+    pipeline: Pipeline
+    feature_names: List[str]
+    target_names: List[str]
     metrics: Dict[str, float]
-    feature_importance: Optional[pd.DataFrame] = None
-    training_time: float = 0.0
-    hyperparameters: Dict[str, Any] = None
+    per_target_metrics: pd.DataFrame
+    feature_importance: pd.DataFrame
+    best_params: Dict[str, Any]
+    best_cv_score: Optional[float]
+    training_seconds: float
+    y_test: np.ndarray
+    y_pred: np.ndarray
+    test_indices: np.ndarray
+
 
 @dataclass
-class PSOResults:
-    """Container for PSO optimization results"""
-    optimal_prv_settings: List[np.ndarray]
-    optimal_pressures: List[np.ndarray]
-    demands: List[np.ndarray]
-    critical_point_predictions: np.ndarray
-    score: float
-    convergence_history: List[float]
-    optimization_time: float = 0.0
-    final_parameters: Dict[str, Any] = None
+class PSOHourResult:
+    hour: int
+    demand: float
+    prv_settings: np.ndarray
+    downstream_pressures: np.ndarray
+    critical_pressures: Optional[np.ndarray]
+    objective: float
+    convergence: List[float]
 
-# Abstract Base Classes
-class DataProcessor(ABC):
-    """Abstract base class for data processing"""
-    
-    @abstractmethod
-    def preprocess(self, data: pd.DataFrame) -> pd.DataFrame:
-        """Preprocess the input data"""
-        pass
-    
-    @abstractmethod
-    def validate_columns(self, data: pd.DataFrame) -> bool:
-        """Validate required columns"""
-        pass
 
-class ModelTrainer(ABC):
-    """Abstract base class for model training"""
-    
-    @abstractmethod
-    def train(self, X: np.ndarray, y: np.ndarray) -> ModelResults:
-        """Train the model"""
-        pass
-    
-    @abstractmethod
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        """Make predictions"""
-        pass
+@dataclass
+class OptimizationResult:
+    hours: List[PSOHourResult]
+    prv_names: List[str]
+    downstream_names: List[str]
+    critical_names: List[str]
+    total_seconds: float
 
-class Optimizer(ABC):
-    """Abstract base class for optimization algorithms"""
-    
-    @abstractmethod
-    def optimize(self, *args, **kwargs) -> PSOResults:
-        """Run optimization algorithm"""
-        pass
-
-# Concrete Implementations
-class WaterNetworkDataProcessor(DataProcessor):
-    """Concrete implementation for water network data processing"""
-    
-    def __init__(self, constants: Constants):
-        self.constants = constants
-    
-    def preprocess(self, data: pd.DataFrame) -> pd.DataFrame:
-        """Preprocess the data: impute missing values and remove outliers"""
-        logger.info("Starting data preprocessing")
-        
-        # Impute missing values
-        imputer = KNNImputer(n_neighbors=self.constants.N_NEIGHBORS_IMPUTER)
-        data_imputed = pd.DataFrame(
-            imputer.fit_transform(data), 
-            columns=data.columns
-        )
-        
-        # Remove outliers using IQR
-        Q1 = data_imputed.quantile(0.25)
-        Q3 = data_imputed.quantile(0.75)
-        IQR = Q3 - Q1
-        
-        outlier_mask = ~(
-            (data_imputed < (Q1 - self.constants.OUTLIER_THRESHOLD * IQR)) | 
-            (data_imputed > (Q3 + self.constants.OUTLIER_THRESHOLD * IQR))
-        ).any(axis=1)
-        
-        data_clean = data_imputed[outlier_mask]
-        logger.info(f"Data preprocessing completed. Removed {len(data) - len(data_clean)} outliers")
-        
-        return data_clean
-    
-    def validate_columns(self, data: pd.DataFrame) -> bool:
-        """Validate required columns exist"""
-        required_columns = {
-            'PRV': lambda col: "prv" in col.lower(),
-            'Critical Point': lambda col: col.lower().startswith("j-"),
-            'Point After Valve': lambda col: col.endswith("-B"),
-            'Deby': lambda col: col == 'P-676'
-        }
-        
-        for category, validator in required_columns.items():
-            if not any(validator(col) for col in data.columns):
-                logger.error(f"Missing required column for {category}")
-                return False
-        
-        return True
-
-class XGBoostTrainer(ModelTrainer):
-    """Concrete implementation for XGBoost model training"""
-    
-    def __init__(self, constants: Constants):
-        self.constants = constants
-        self.model = None
-        self.scaler = None
-        self.feature_names = None
-    
-    def train(self, X: np.ndarray, y: np.ndarray) -> ModelResults:
-        """Train XGBoost model with hyperparameter tuning"""
-        import time
-        start_time = time.time()
-        
-        logger.info("Starting XGBoost model training")
-        
-        # Scale features
-        self.scaler = StandardScaler()
-        X_scaled = self.scaler.fit_transform(X)
-        
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_scaled, y, 
-            test_size=self.constants.TEST_SIZE, 
-            random_state=self.constants.RANDOM_STATE
-        )
-        
-        # Hyperparameter tuning
-        base_model = xgb.XGBRegressor(
-            random_state=self.constants.RANDOM_STATE, 
-            n_jobs=-1
-        )
-        
-        # Handle multi-output case
-        if y.ndim > 1 and y.shape[1] > 1:
-            model = MultiOutputRegressor(base_model)
-            param_dist = {
-                f'estimator__{key}': value 
-                for key, value in self.constants.XGBOOST_PARAMS.items()
+    def to_dataframe(self) -> pd.DataFrame:
+        rows: List[Dict[str, Any]] = []
+        for item in self.hours:
+            row: Dict[str, Any] = {
+                "Hour": item.hour,
+                "Demand": item.demand,
+                "Objective": item.objective,
+                "Downstream_Min": float(np.min(item.downstream_pressures)),
+                "Downstream_Mean": float(np.mean(item.downstream_pressures)),
+                "Downstream_Max": float(np.max(item.downstream_pressures)),
             }
-        else:
-            model = base_model
-            param_dist = self.constants.XGBOOST_PARAMS
-        
-        random_search = RandomizedSearchCV(
-            estimator=model,
-            param_distributions=param_dist,
-            n_iter=10,
-            cv=3,
-            scoring='r2',
-            n_jobs=-1,
-            random_state=self.constants.RANDOM_STATE
-        )
-        
-        random_search.fit(X_train, y_train)
-        self.model = random_search.best_estimator_
-        
-        # Evaluate model
-        y_pred = self.model.predict(X_test)
-        mae = mean_absolute_error(y_test, y_pred)
-        r2 = r2_score(y_test, y_pred)
-        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-        
-        training_time = time.time() - start_time
-        
-        # Get feature importance if available
-        feature_importance = None
-        if hasattr(self.model, 'feature_importances_'):
-            feature_importance = pd.DataFrame({
-                'feature': [f'Feature_{i}' for i in range(X.shape[1])],
-                'importance': self.model.feature_importances_
-            })
-        
-        logger.info(f"Model training completed in {training_time:.2f} seconds. MAE: {mae:.4f}, R²: {r2:.4f}")
-        
-        return ModelResults(
-            model=self.model,
-            scaler=self.scaler,
-            predictions={},
-            metrics={'mae': mae, 'r2': r2, 'rmse': rmse},
-            feature_importance=feature_importance,
-            training_time=training_time,
-            hyperparameters=random_search.best_params_
-        )
-    
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        """Make predictions using the trained model"""
-        if self.model is None or self.scaler is None:
-            raise ValueError("Model not trained yet")
-        
-        X_scaled = self.scaler.transform(X)
-        return self.model.predict(X_scaled)
+            for name, value in zip(self.prv_names, item.prv_settings):
+                row[f"PRV::{name}"] = float(value)
+            for name, value in zip(self.downstream_names, item.downstream_pressures):
+                row[f"Downstream::{name}"] = float(value)
+            if item.critical_pressures is not None:
+                for name, value in zip(self.critical_names, item.critical_pressures):
+                    row[f"Critical::{name}"] = float(value)
+            rows.append(row)
+        return pd.DataFrame(rows)
 
-class PSOOptimizer(Optimizer):
-    """Concrete implementation of PSO optimization"""
-    
-    def __init__(self, constants: Constants):
-        self.constants = constants
-    
-    def optimize(self, demands: np.ndarray, prev_prv_settings: Optional[np.ndarray] = None) -> PSOResults:
-        """Run PSO optimization for PRV settings"""
-        import time
-        start_time = time.time()
-        
-        logger.info("Starting PSO optimization")
-        
-        num_prvs = len(self.constants.PSO_PARAMS)
-        num_particles = self.constants.PSO_PARAMS["num_particles"]
-        max_iterations = self.constants.PSO_PARAMS["max_iterations"]
-        w_max = self.constants.PSO_PARAMS["w_max"]
-        w_min = self.constants.PSO_PARAMS["w_min"]
-        c1 = self.constants.PSO_PARAMS["c1"]
-        c2 = self.constants.PSO_PARAMS["c2"]
-        
-        # Initialize particles and velocities
-        particles = np.random.uniform(
-            self.constants.MIN_PRV, 
-            self.constants.MAX_PRV, 
-            (num_particles, num_prvs)
-        )
-        v_max = (self.constants.MAX_PRV - self.constants.MIN_PRV) * 0.2
-        velocities = np.random.uniform(-v_max, v_max, (num_particles, num_prvs))
-        
-        # Initialize personal and global best
-        pbest = particles.copy()
-        pbest_scores = np.array([
-            self._objective_function(p, demands, prev_prv_settings) 
-            for p in particles
-        ])
-        gbest_idx = np.argmin(pbest_scores)
-        gbest = pbest[gbest_idx].copy()
-        gbest_score = pbest_scores[gbest_idx]
-        
-        convergence_history = [gbest_score]
-        
-        # PSO main loop
-        for iteration in range(max_iterations):
-            w = w_max - (w_max - w_min) * (iteration / max_iterations)
-            c1_t = c1 * (1.0 + 0.5 * (iteration / max_iterations))
-            c2_t = c2 * (1.0 - 0.5 * (iteration / max_iterations))
-            
-            for i in range(num_particles):
-                r1, r2 = np.random.random(), np.random.random()
-                velocities[i] = (
-                    w * velocities[i] + 
-                    c1_t * r1 * (pbest[i] - particles[i]) + 
-                    c2_t * r2 * (gbest - particles[i])
-                )
-                velocities[i] = np.clip(velocities[i], -v_max, v_max)
-                particles[i] += velocities[i]
-                particles[i] = np.clip(particles[i], self.constants.MIN_PRV, self.constants.MAX_PRV)
-                
-                score = self._objective_function(particles[i], demands, prev_prv_settings)
-                if score < pbest_scores[i]:
-                    pbest[i] = particles[i].copy()
-                    pbest_scores[i] = score
-                    if score < gbest_score:
-                        gbest = particles[i].copy()
-                        gbest_score = score
-            
-            convergence_history.append(gbest_score)
-        
-        pressures = self._calculate_pressures(gbest, demands)
-        optimization_time = time.time() - start_time
-        
-        final_parameters = {
-            'num_particles': num_particles,
-            'max_iterations': max_iterations,
-            'w_max': w_max,
-            'w_min': w_min,
-            'c1': c1,
-            'c2': c2,
-            'final_score': gbest_score,
-            'convergence_rate': (convergence_history[0] - convergence_history[-1]) / len(convergence_history)
-        }
-        
-        logger.info(f"PSO optimization completed in {optimization_time:.2f} seconds. Best score: {gbest_score:.4f}")
-        
-        return PSOResults(
-            optimal_prv_settings=[gbest],
-            optimal_pressures=[pressures],
-            demands=[demands],
-            critical_point_predictions=np.array([]),
-            score=gbest_score,
-            convergence_history=convergence_history,
-            optimization_time=optimization_time,
-            final_parameters=final_parameters
-        )
-    
-    def _objective_function(self, prv_settings: np.ndarray, demands: np.ndarray, 
-                          prev_prv_settings: Optional[np.ndarray] = None) -> float:
-        """Calculate objective function for PSO"""
-        pressures = self._calculate_pressures(prv_settings, demands)
-        penalty = 0.0
-        
-        # Pressure constraint penalty
-        for p in pressures:
-            if p < self.constants.MIN_PRESSURE:
-                penalty += (self.constants.MIN_PRESSURE - p) ** 2
-            elif p > self.constants.MAX_PRESSURE:
-                penalty += (p - self.constants.MAX_PRESSURE) ** 2
-        
-        # Stability penalty
-        if prev_prv_settings is not None:
-            stability_penalty = np.sum((prv_settings - prev_prv_settings) ** 2) * 0.1
-            penalty += stability_penalty
-        
-        return penalty
-    
-    def _calculate_pressures(self, prv_settings: np.ndarray, demands: np.ndarray, 
-                           elevations: Optional[np.ndarray] = None) -> np.ndarray:
-        """Calculate pressures based on PRV settings and demands"""
-        if elevations is None:
-            elevations = np.zeros(len(demands))
-        
-        pressures = np.zeros(len(demands))
-        for i, demand in enumerate(demands):
-            head_loss = 0.01 * demand + 0.0005 * (np.mean(prv_settings) - demand) ** 2
-            pressures[i] = np.mean(prv_settings) - head_loss - elevations[i]
-            pressures[i] = np.clip(pressures[i], self.constants.MIN_PRESSURE, self.constants.MAX_PRESSURE)
-        
-        return pressures
 
-# Utility Classes
-class PlotGenerator:
-    """Generate and display high-quality plots using matplotlib and seaborn"""
-    
-    def __init__(self):
-        # Set professional style for plots
-        sns.set_style("whitegrid")
-        sns.set_context("notebook", font_scale=1.0)  # تغییر از "talk" به "notebook" برای اندازه کوچکتر
-        
-        # Set matplotlib parameters
-        plt.rcParams.update({
-            'figure.dpi': 150,  # کاهش DPI برای اندازه کوچکتر
-            'savefig.dpi': 300,
-            'font.family': 'sans-serif',
-            'font.sans-serif': ['Helvetica', 'Arial', 'DejaVu Sans'],
-            'font.size': 10,  # کاهش اندازه فونت
-            'axes.titlesize': 14,
-            'axes.labelsize': 12,
-            'xtick.labelsize': 10,
-            'ytick.labelsize': 10,
-            'legend.fontsize': 10,
-            'lines.linewidth': 1.5,  # کاهش ضخامت خطوط
-            'patch.edgecolor': 'white',
-            'patch.force_edgecolor': True,
-            'figure.autolayout': True,
-            'axes.grid': True,
-            'grid.linestyle': '--',
-            'grid.alpha': 0.5,  # کاهش شفافیت خطوط شبکه
-        })
-    
-    def create_boxplot(self, data: pd.DataFrame, title: str) -> plt.Figure:
-        """Create a high-quality boxplot from dataframe"""
-        # تنظیم اندازه بر اساس تعداد ستون‌ها
-        n_cols = len(data.columns)
-        fig_width = max(8, min(n_cols * 0.8, 15))  # کاهش ضریب عرض
-        fig_height = 6  # کاهش ارتفاع
-        
-        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-        
-        # Create boxplot with enhanced styling
-        boxplot = sns.boxplot(
-            data=data, ax=ax, palette="Set2", linewidth=1.5, fliersize=4,
-            boxprops=dict(alpha=0.9), whiskerprops=dict(linestyle='--')
-        )
-        
-        # Add title and labels
-        ax.set_title(title, fontsize=14, pad=15, fontweight='bold')
-        ax.set_ylabel("Values", fontsize=12, labelpad=8)
-        ax.set_xlabel("Categories", fontsize=12, labelpad=8)
-        
-        # Rotate x-axis labels for better readability
-        plt.xticks(rotation=45, ha='right', fontsize=10)
-        plt.yticks(fontsize=10)
-        
-        # Adjust layout
-        plt.tight_layout()
-        
-        return fig
-    
-    def create_scatter_plot(self, actual: np.ndarray, predicted: np.ndarray, 
-                          title: str, x_label: str, y_label: str) -> plt.Figure:
-        """Create a high-quality scatter plot with regression line"""
-        fig, ax = plt.subplots(figsize=(8, 6))  # کاهش اندازه
-        
-        # Create scatter plot
-        scatter = ax.scatter(actual, predicted, alpha=0.7, edgecolors='w', s=60, 
-                           color='#1f77b4', label='Predictions', linewidth=1)
-        
-        # Add regression line
-        sns.regplot(x=actual, y=predicted, scatter=False, ax=ax, 
-                   color='#ff7f0e', line_kws={"linewidth": 2, "linestyle": "--"})
-        
-        # Add perfect prediction line
-        min_val = min(actual.min(), predicted.min())
-        max_val = max(actual.max(), predicted.max())
-        ax.plot([min_val, max_val], [min_val, max_val], 'k-', alpha=0.7, 
-                linewidth=2, label='Perfect Prediction')
-        
-        # Add title and labels
-        ax.set_title(title, fontsize=14, pad=15, fontweight='bold')
-        ax.set_xlabel(x_label, fontsize=12, labelpad=8)
-        ax.set_ylabel(y_label, fontsize=12, labelpad=8)
-        
-        # Set tick sizes
-        ax.tick_params(axis='both', which='major', labelsize=10)
-        
-        # Add legend
-        ax.legend(loc='upper left', frameon=True, fontsize=10)
-        
-        # Calculate and display R²
-        r2 = np.corrcoef(actual, predicted)[0, 1]**2
-        ax.text(0.05, 0.95, f'R² = {r2:.3f}', transform=ax.transAxes, 
-                fontsize=11, verticalalignment='top', fontweight='bold',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='gray'))
-        
-        # Adjust layout
-        plt.tight_layout()
-        
-        return fig
-    
-    def create_line_plot(self, data: Dict[str, List[float]], title: str, 
-                        x_label: str, y_label: str) -> plt.Figure:
-        """Create a high-quality line plot with multiple series"""
-        n_series = len(data)
-        fig_width = max(8, min(n_series * 1.2, 14))  # کاهش ضریب عرض
-        fig, ax = plt.subplots(figsize=(fig_width, 6))  # کاهش ارتفاع
-        
-        # Color palette
-        colors = sns.color_palette("husl", n_series)
-        
-        # Create line plot for each series
-        for i, (label, values) in enumerate(data.items()):
-            ax.plot(range(1, len(values)+1), values, 
-                   linewidth=2, marker='o', markersize=5,  # کاهش اندازه نشانگرها
-                   markeredgecolor='w', markeredgewidth=1, 
-                   color=colors[i], label=label)
-        
-        # Add title and labels
-        ax.set_title(title, fontsize=14, pad=15, fontweight='bold')
-        ax.set_xlabel(x_label, fontsize=12, labelpad=8)
-        ax.set_ylabel(y_label, fontsize=12, labelpad=8)
-        
-        # Set x-axis ticks
-        ax.set_xticks(range(1, len(list(data.values())[0])+1))
-        ax.tick_params(axis='both', which='major', labelsize=10)
-        
-        # Add legend
-        ax.legend(loc='best', frameon=True, fontsize=9, ncol=min(n_series, 3))
-        
-        # Adjust layout
-        plt.tight_layout()
-        
-        return fig
-    
-    def create_comparison_plot(self, simulated: np.ndarray, predicted: np.ndarray, 
-                            node_names: List[str], title: str) -> plt.Figure:
-        """Create a comparison plot for simulation vs predicted values"""
-        num_nodes = len(node_names)
-        fig_height = max(6, num_nodes * 1.5)  # کاهش ضریب ارتفاع
-        fig = plt.figure(figsize=(10, fig_height))
-        gs = gridspec.GridSpec(num_nodes, 1, figure=fig, hspace=0.4)  # کاهش فاصله
-        
-        for i, node in enumerate(node_names):
-            ax = fig.add_subplot(gs[i])
-            
-            # Plot simulated values
-            ax.plot(range(1, simulated.shape[0]+1), simulated[:, i], 
-                   linewidth=2, label='Simulated', color='#1f77b4')
-            
-            # Plot predicted values
-            ax.plot(range(1, simulated.shape[0]+1), predicted[:, i], 
-                   linewidth=2, label='Predicted', color='#ff7f0e', linestyle='--')
-            
-            # Add title and labels
-            ax.set_title(f'Node: {node}', fontsize=12, pad=8, fontweight='bold')
-            ax.set_xlabel('Hour', fontsize=10, labelpad=6)
-            ax.set_ylabel('Pressure (m)', fontsize=10, labelpad=6)
-            
-            # Set tick sizes
-            ax.tick_params(axis='both', which='major', labelsize=9)
-            
-            # Add legend
-            ax.legend(loc='upper right', frameon=True, fontsize=9)
-            
-            # Set x-axis ticks
-            ax.set_xticks(range(1, simulated.shape[0]+1, 2))
-        
-        # Add main title
-        fig.suptitle(title, fontsize=16, y=0.99, fontweight='bold')
-        
-        # Adjust layout
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
-        
-        return fig
-    
-    def create_pressure_heatmap(self, pressures: np.ndarray, node_names: List[str], 
-                             title: str) -> plt.Figure:
-        """Create a heatmap of pressure values over time"""
-        num_nodes = len(node_names)
-        fig_width = max(10, min(pressures.shape[0] * 0.4, 15))  # کاهش ضریب عرض
-        fig_height = max(6, num_nodes * 0.4)  # کاهش ضریب ارتفاع
-        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-        
-        # Create heatmap with annotations
-        sns.heatmap(
-            pressures.T, annot=True, fmt=".1f", cmap="YlOrRd", 
-            linewidths=0.3, ax=ax, cbar_kws={'label': 'Pressure (m)', 'shrink': 0.8},
-            annot_kws={"fontsize": min(9, max(7, 60 // len(node_names)))}  # تنظیم فونت متناسب با تعداد گره‌ها
-        )
-        
-        # Set labels
-        ax.set_title(title, fontsize=14, pad=15, fontweight='bold')
-        ax.set_xlabel('Hour', fontsize=12, labelpad=8)
-        ax.set_ylabel('Node', fontsize=12, labelpad=8)
-        
-        # Set ticks
-        ax.set_xticks(np.arange(0.5, len(pressures)+0.5, 1))
-        ax.set_xticklabels(range(1, len(pressures)+1))
-        ax.set_yticks(np.arange(0.5, len(node_names)+0.5, 1))
-        ax.set_yticklabels(node_names, rotation=0)
-        
-        # Set tick sizes
-        ax.tick_params(axis='both', which='major', labelsize=10)
-        
-        # Adjust layout
-        plt.tight_layout()
-        
-        return fig
-    
-    def create_convergence_plot(self, convergence_history: List[float], title: str) -> plt.Figure:
-        """Create convergence plot for PSO optimization"""
-        fig, ax = plt.subplots(figsize=(8, 6))  # کاهش اندازه
-        
-        ax.plot(range(1, len(convergence_history)+1), convergence_history, 
-               linewidth=2, marker='o', markersize=5, color='#2ca02c')
-        
-        ax.set_title(title, fontsize=14, pad=15, fontweight='bold')
-        ax.set_xlabel('Iteration', fontsize=12, labelpad=8)
-        ax.set_ylabel('Objective Function Value', fontsize=12, labelpad=8)
-        
-        ax.tick_params(axis='both', which='major', labelsize=10)
-        
-        plt.tight_layout()
-        
-        return fig
-    
-    def create_feature_importance_plot(self, feature_importance: pd.DataFrame, title: str) -> plt.Figure:
-        """Create feature importance plot"""
-        n_features = len(feature_importance)
-        fig_height = max(5, min(n_features * 0.3, 8))  # کاهش ضریب ارتفاع
-        fig, ax = plt.subplots(figsize=(8, fig_height))
-        
-        # Sort features by importance
-        feature_importance = feature_importance.sort_values('importance', ascending=True)
-        
-        bars = ax.barh(feature_importance['feature'], feature_importance['importance'], 
-                      color='#d62728', alpha=0.8)
-        
-        ax.set_title(title, fontsize=14, pad=15, fontweight='bold')
-        ax.set_xlabel('Importance', fontsize=12, labelpad=8)
-        ax.set_ylabel('Features', fontsize=12, labelpad=8)
-        
-        ax.tick_params(axis='both', which='major', labelsize=10)
-        
-        # Add value labels on bars
-        for i, bar in enumerate(bars):
-            width = bar.get_width()
-            ax.text(width + 0.01, bar.get_y() + bar.get_height()/2, 
-                   f'{width:.3f}', ha='left', va='center', fontsize=9)
-        
-        plt.tight_layout()
-        
-        return fig
-    
-    def show_plot(self, fig: plt.Figure, title: str) -> None:
-        """Display plot in a new window"""
-        # Create new window
-        plot_window = tk.Toplevel()
-        plot_window.title(title)
-        # تنظیم اندازه پنجره متناسب با رزولوشن
-        plot_window.geometry("1000x700")  # کاهش اندازه پنجره
-        
-        # Create canvas
-        canvas = FigureCanvasTkAgg(fig, master=plot_window)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        
-        # Add toolbar
-        toolbar = NavigationToolbar2Tk(canvas, plot_window)
-        toolbar.update()
-        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        
-        # Add save button with high-quality export
-        def save_plot():
-            file_path = filedialog.asksaveasfilename(
-                title="Save Plot",
-                defaultextension=".png",
-                filetypes=[("PNG Files", "*.png"), ("SVG Files", "*.svg"), ("All Files", "*.*")]
-            )
-            if file_path:
-                fig.savefig(file_path, bbox_inches='tight', dpi=300, facecolor='white', format=file_path.split('.')[-1])
-                messagebox.showinfo("Success", f"Plot saved to {file_path}")
-        
-        save_button = ttk.Button(plot_window, text="Save Plot", command=save_plot)
-        save_button.pack(pady=10)
+# -----------------------------------------------------------------------------
+# File I/O and schema detection
+# -----------------------------------------------------------------------------
 
-class FileHandler:
-    """Handle file I/O operations"""
-    
+class CSVService:
+    """CSV reader/writer with encoding fallbacks and clean validation."""
+
+    ENCODINGS: Tuple[str, ...] = ("utf-8-sig", "utf-8", "cp1252", "latin1")
+
+    @classmethod
+    def load(cls, path: str | Path) -> pd.DataFrame:
+        path = Path(path)
+        if not path.is_file():
+            raise FileNotFoundError(f"CSV file not found: {path}")
+
+        errors: List[str] = []
+        for encoding in cls.ENCODINGS:
+            try:
+                df = pd.read_csv(path, encoding=encoding)
+                if df.empty:
+                    raise ValueError("CSV contains no rows.")
+                if len(df.columns) < 2:
+                    raise ValueError("CSV must contain at least two columns.")
+                df.columns = [str(c).strip() for c in df.columns]
+                logger.info("Loaded %s: %d rows x %d cols (%s)", path, len(df), len(df.columns), encoding)
+                return df
+            except UnicodeDecodeError as exc:
+                errors.append(f"{encoding}: {exc}")
+            except pd.errors.ParserError as exc:
+                errors.append(f"{encoding}: {exc}")
+
+        raise ValueError("Could not decode/parse CSV. " + " | ".join(errors[-3:]))
+
     @staticmethod
-    def load_csv(file_path: str) -> pd.DataFrame:
-        """Load CSV file with validation"""
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"File not found: {file_path}")
-        
-        try:
-            df = pd.read_csv(file_path)
-            logger.info(f"Loaded CSV file with {len(df)} rows and {len(df.columns)} columns")
-            return df
-        except Exception as e:
-            logger.error(f"Error loading CSV file: {str(e)}")
-            raise
-    
-    @staticmethod
-    def save_csv(data: pd.DataFrame, file_path: str) -> None:
-        """Save DataFrame to CSV file"""
-        try:
-            data.to_csv(file_path, index=False)
-            logger.info(f"Data saved to {file_path}")
-        except Exception as e:
-            logger.error(f"Error saving CSV file: {str(e)}")
-            raise
+    def save(df: pd.DataFrame, path: str | Path) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False, encoding="utf-8-sig")
+        logger.info("Saved CSV: %s", path)
 
-class SimpleSimulator:
-    """Simple simulator for demonstration purposes"""
-    
-    @staticmethod
-    def run_simulation(inp_file: str, critical_point_ids: List[str], hours: List[int] = None) -> np.ndarray:
-        """Run a simple simulation (placeholder for WNTR)"""
-        logger.info("Running simple simulation (WNTR placeholder)")
-        
-        if hours is None:
-            hours = list(range(1, 25))  # Default to all 24 hours
-        
-        num_hours = len(hours)
-        num_points = len(critical_point_ids)
-        
-        # Generate random but realistic pressure values
-        base_pressures = np.random.uniform(20, 50, num_points)
-        
-        # Create hourly variations for all 24 hours
-        all_hourly_variations = np.sin(np.linspace(0, 2*np.pi, 24)) * 5
-        
-        # Generate pressure data for selected hours
-        simulated_pressures = []
-        for h in hours:
-            idx = h - 1  # 0-based index
-            variation = all_hourly_variations[idx]
-            hour_pressures = base_pressures + variation + np.random.normal(0, 2, num_points)
-            hour_pressures = np.clip(hour_pressures, 10, 60)  # Keep within realistic range
-            simulated_pressures.append(hour_pressures)
-        
-        logger.info(f"Simple simulation completed for {num_hours} selected hours and {num_points} points")
-        return np.array(simulated_pressures)
 
-class INPGenerator:
-    """Generate INP files for water network simulation"""
-    
-    @staticmethod
-    def generate_inp_file(results: PSOResults, file_path: str, 
-                         critical_point_ids: List[str], 
-                         point_after_valve_ids: List[str]) -> None:
-        """Generate WNTR INP file with SI units"""
-        try:
-            with open(file_path, 'w') as f:
-                # Title section
-                f.write("[TITLE]\n")
-                f.write("Water Network Simulation\n")
-                f.write("Generated by Water Network Analyzer\n\n")
-                
-                # Junctions section
-                f.write("[JUNCTIONS]\n")
-                f.write(";ID\tElev\tDemand\tPattern\n")
-                for node in critical_point_ids + point_after_valve_ids:
-                    elevation = Constants.DEFAULT_ELEVATION
-                    base_demand = Constants.DEFAULT_BASE_DEMAND
-                    f.write(f"{node}\t{elevation:.2f}\t{base_demand:.4f}\t;\n")
-                f.write("\n")
-                
-                # Reservoirs section
-                f.write("[RESERVOIRS]\n")
-                f.write(";ID\tHead\n")
-                f.write(f"RES\t{Constants.DEFAULT_RESERVOIR_HEAD:.2f}\n\n")
-                
-                # Pipes section
-                f.write("[PIPES]\n")
-                f.write(";ID\tNode1\tNode2\tLength\tDiameter\tRoughness\n")
-                all_nodes = critical_point_ids + point_after_valve_ids
-                for i in range(len(all_nodes) - 1):
-                    length = Constants.DEFAULT_PIPE_LENGTH
-                    diameter = Constants.DEFAULT_PIPE_DIAMETER
-                    roughness = Constants.DEFAULT_PIPE_ROUGHNESS
-                    f.write(f"P{i+1}\t{all_nodes[i]}\t{all_nodes[i+1]}\t{length:.2f}\t{diameter:.3f}\t{roughness:.1f}\n")
-                f.write("\n")
-                
-                # Valves section
-                f.write("[VALVES]\n")
-                f.write(";ID\tNode1\tNode2\tDiameter\tType\tSetting\tMinorLoss\n")
-                num_prvs = len(results.optimal_prv_settings[0])
-                for i in range(num_prvs):
-                    prv_id = f"PRV{i+1}"
-                    node1 = all_nodes[i % len(all_nodes)]
-                    node2 = all_nodes[(i + 1) % len(all_nodes)]
-                    avg_setting = np.mean([settings[i] for settings in results.optimal_prv_settings])
-                    diameter = Constants.DEFAULT_PIPE_DIAMETER
-                    minor_loss = 0.0
-                    f.write(f"{prv_id}\t{node1}\t{node2}\t{diameter:.3f}\tPRV\t{avg_setting:.2f}\t{minor_loss:.2f}\n")
-                f.write("\n")
-                
-                # Patterns section
-                f.write("[PATTERNS]\n")
-                f.write(";ID\tMultipliers\n")
-                f.write("DEMAND\t" + " ".join(["1.0"] * Constants.NUM_HOURS) + "\n")
-                
-                for i in range(num_prvs):
-                    f.write(f"PRV{i+1}\t")
-                    multipliers = [f"{settings[i]:.2f}" for settings in results.optimal_prv_settings]
-                    f.write(" ".join(multipliers) + "\n")
-                f.write("\n")
-                
-                # Controls section
-                f.write("[CONTROLS]\n")
-                f.write(";ID\tCondition\tAction\n")
-                for i in range(num_prvs):
-                    prv_id = f"PRV{i+1}"
-                    for hour in range(Constants.NUM_HOURS):
-                        f.write(f"C{prv_id}_{hour}\tAT TIME {hour} CLOCKTIME\tLINK {prv_id} SETTING PRV{i+1}\n")
-                f.write("\n")
-                
-                # Options section with SI units
-                f.write("[OPTIONS]\n")
-                f.write("UNITS\tSI\n")  # Use SI units
-                f.write("HEADLOSS\tH-W\n")
-                f.write("QUALITY\tNONE\n")
-                f.write("VISCOSITY\t1.0\n")
-                f.write("TRIALS\t40\n")
-                f.write("ACCURACY\t0.001\n")
-                f.write("TOLERANCE\t0.01\n")
-                f.write("EMITTER EXPONENT\t0.5\n")
-                f.write("DEMAND MULTIPLIER\t1.0\n")
-                f.write("\n")
-                
-                # Times section
-                f.write("[TIMES]\n")
-                f.write("DURATION\t24:00\n")
-                f.write("HYDRAULIC TIMESTEP\t1:00\n")
-                f.write("QUALITY TIMESTEP\t0:05\n")
-                f.write("REPORT TIMESTEP\t1:00\n")
-                f.write("REPORT START\t0:00\n")
-                f.write("PATTERN TIMESTEP\t1:00\n")
-                f.write("\n")
-                
-                # Report section
-                f.write("[REPORT]\n")
-                f.write("PAGESIZE\t60\n")
-                f.write("FILE\tYES\n")
-                f.write("\n")
-                
-                # End section
-                f.write("[END]\n")
-            
-            logger.info(f"INP file generated successfully: {file_path}")
-            
-        except Exception as e:
-            logger.error(f"Error generating INP file: {str(e)}")
-            raise
+class SchemaDetector:
+    """Detect repository-compatible water-network column naming patterns."""
 
-# GUI Components
-class WaterNetworkGUI:
-    """Main GUI application for water network analysis"""
-    
-    def __init__(self, root: tk.Tk):
-        self.root = root
-        self.root.title("Water Network Analyzer - Professional Edition v4.0")
-        self.root.geometry("1200x800")
-        self.root.configure(bg="#f0f0f0")
-        
-        # Initialize components
-        self.constants = Constants()
-        self.data_processor = WaterNetworkDataProcessor(self.constants)
-        self.model_trainer = XGBoostTrainer(self.constants)
-        self.optimizer = PSOOptimizer(self.constants)
-        self.plot_generator = PlotGenerator()
-        self.file_handler = FileHandler()
-        self.simulator = SimpleSimulator()
-        self.inp_generator = INPGenerator()
-        
-        # Data storage
-        self.water_network_data: Optional[WaterNetworkData] = None
-        self.model_results: Optional[ModelResults] = None
-        self.pso_results: Optional[PSOResults] = None
-        
-        # GUI elements
-        self.treeviews: Dict[str, ttk.Treeview] = {}
-        self.search_vars: Dict[str, tk.StringVar] = {}
-        self.progress_bar: Optional[ttk.Progressbar] = None
-        
-        # Setup GUI
-        self._setup_gui()
-        self._setup_menu()
-        self._setup_controls()
-        
-        # Configure styles
-        self._configure_styles()
-        
-        logger.info("GUI initialized successfully")
-    
-    def _setup_gui(self):
-        """Setup main GUI components"""
-        # Main container
-        main_frame = ttk.Frame(self.root)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Notebook for tabs
-        self.tabs = ttk.Notebook(main_frame)
-        self.tabs.pack(fill=tk.BOTH, expand=True)
-        
-        # Status bar
-        self.status_bar = ttk.Label(
-            self.root, 
-            text="Ready", 
-            relief=tk.SUNKEN, 
-            anchor=tk.W
-        )
-        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
-    
-    def _setup_menu(self):
-        """Setup application menu"""
-        menubar = tk.Menu(self.root)
-        self.root.config(menu=menubar)
-        
-        # File menu
-        file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="File", menu=file_menu)
-        file_menu.add_command(label="Open CSV File", command=self.load_file)
-        file_menu.add_command(label="Save CSV File", command=self.save_file)
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.root.quit)
-        
-        # Analysis menu
-        analysis_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Analysis", menu=analysis_menu)
-        analysis_menu.add_command(label="Extract Deby Data", command=self.extract_deby)
-        analysis_menu.add_command(label="Analyze Point After Valve", command=self.analyze_point_after_valve)
-        analysis_menu.add_command(label="Predict Pressures", command=self.predict_pressures)
-        
-        # Model menu
-        model_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Model", menu=model_menu)
-        model_menu.add_command(label="Train XGBoost Model", command=self.train_xgboost_model)
-        model_menu.add_command(label="Predict Critical Points", command=self.predict_critical_points)
-        
-        # Optimization menu
-        optimization_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Optimization", menu=optimization_menu)
-        optimization_menu.add_command(label="Optimize with PSO", command=self.optimize_with_pso)
-        optimization_menu.add_command(label="Run Simulation", command=self.run_simulation)
-        
-        # Help menu
-        help_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="Help", menu=help_menu)
-        help_menu.add_command(label="About", command=self.show_about)
-    
-    def _setup_controls(self):
-        """Setup control buttons"""
-        control_frame = ttk.LabelFrame(self.root, text="Controls", padding=10)
-        control_frame.pack(fill=tk.X, padx=10, pady=5)
-        
-        buttons = [
-            ("Load Data", self.load_file, "Load water network data from CSV"),
-            ("Save Data", self.save_file, "Save current data to CSV"),
-            ("Undo Changes", self.undo_changes, "Revert all changes to original data"),
-            ("Extract Deby", self.extract_deby, "Extract Deby data to CSV file"),
-            ("Analyze Valve", self.analyze_point_after_valve, "Analyze Point After Valve data"),
-            ("Predict Pressures", self.predict_pressures, "Predict pressures using XGBoost"),
-            ("Train Model", self.train_xgboost_model, "Train XGBoost model"),
-            ("PSO Optimize", self.optimize_with_pso, "Optimize PRV settings with PSO"),
-            ("Run Simulation", self.run_simulation, "Run hydraulic simulation")
+    DEMAND_EXACT_NAMES = ("p-676", "deby", "demand", "flow", "total_demand")
+
+    @classmethod
+    def detect(cls, df: pd.DataFrame) -> Schema:
+        columns = [str(c).strip() for c in df.columns]
+        lower = {c: c.lower().strip() for c in columns}
+
+        prv = [
+            c for c in columns
+            if "prv" in lower[c]
+            and not any(token in lower[c] for token in ("status", "id", "name"))
         ]
-        
-        for text, command, tooltip in buttons:
-            btn = ttk.Button(control_frame, text=text, command=command)
-            btn.pack(side=tk.LEFT, padx=5, pady=5)
-            self._add_tooltip(btn, tooltip)
-        
-        # Progress bar
-        self.progress_bar = ttk.Progressbar(
-            self.root, 
-            mode='indeterminate', 
-            length=300
-        )
-        self.progress_bar.pack(fill=tk.X, padx=10, pady=5)
-    
-    def _configure_styles(self):
-        """Configure GUI styles"""
-        style = ttk.Style()
-        style.theme_use('clam')
-        
-        # Configure fonts
-        self.custom_font = font.Font(family="Helvetica", size=10)
-        self.title_font = font.Font(family="Helvetica", size=12, weight="bold")
-        
-        # Configure styles
-        style.configure("TNotebook.Tab", padding=[12, 8], font=('Helvetica', 11))
-        style.configure("TButton", padding=8, font=self.custom_font)
-        style.configure("TLabel", font=self.custom_font, background="#f0f0f0")
-        style.configure("Treeview", font=self.custom_font, rowheight=25)
-        style.configure("Treeview.Heading", font=self.custom_font, weight="bold")
-        style.configure("Title.TLabel", font=self.title_font, background="#f0f0f0")
-    
-    def _add_tooltip(self, widget: tk.Widget, text: str):
-        """Add tooltip to a widget"""
-        tooltip = tk.Toplevel(widget)
-        tooltip.wm_overrideredirect(True)
-        tooltip.withdraw()
-        
-        label = ttk.Label(
-            tooltip, 
-            text=text, 
-            background="#ffffe0", 
-            relief='solid', 
-            borderwidth=1, 
-            font=('Helvetica', 9)
-        )
-        label.pack()
-        
-        def show_tooltip(event):
-            tooltip.wm_geometry(
-                f"+{widget.winfo_rootx()+20}+{widget.winfo_rooty()+30}"
+
+        point_after = [
+            c for c in columns
+            if (
+                lower[c].endswith("-b")
+                or lower[c].endswith("_b")
+                or "after_valve" in lower[c]
+                or "after valve" in lower[c]
+                or "downstream" in lower[c]
             )
-            tooltip.deiconify()
-        
-        def hide_tooltip(event):
-            tooltip.withdraw()
-        
-        widget.bind("<Enter>", show_tooltip)
-        widget.bind("<Leave>", hide_tooltip)
-    
-    def _update_status(self, message: str):
-        """Update status bar message"""
-        self.status_bar.config(text=message)
-        self.root.update_idletasks()
-    
-    def _start_progress(self, message: str):
-        """Start progress bar with message"""
-        if self.progress_bar:
-            self.progress_bar.start()
-            self._update_status(message)
-    
-    def _stop_progress(self):
-        """Stop progress bar"""
-        if self.progress_bar:
-            self.progress_bar.stop()
-            self._update_status("Ready")
-    
-    def _show_accuracy_message(self, title: str, metrics: Dict[str, float], 
-                              additional_info: Optional[str] = None):
-        """Display a message box with accuracy metrics"""
-        message = f"Accuracy Metrics for {title}:\n\n"
-        
-        for metric, value in metrics.items():
-            if metric == 'mae':
-                message += f"Mean Absolute Error (MAE): {value:.4f}\n"
-            elif metric == 'r2':
-                message += f"R-squared (R²): {value:.4f}\n"
-            elif metric == 'rmse':
-                message += f"Root Mean Square Error (RMSE): {value:.4f}\n"
-            elif metric == 'mape':
-                message += f"Mean Absolute Percentage Error (MAPE): {value:.2f}%\n"
-            elif metric == 'penalty':
-                message += f"Optimization Penalty: {value:.4f}\n"
-            elif metric == 'avg_pressure':
-                message += f"Average Pressure: {value:.4f} meters\n"
-            elif metric == 'pressure_std':
-                message += f"Pressure Standard Deviation: {value:.4f}\n"
-            elif metric == 'training_time':
-                message += f"Training Time: {value:.2f} seconds\n"
-            elif metric == 'optimization_time':
-                message += f"Optimization Time: {value:.2f} seconds\n"
-            elif metric == 'convergence_rate':
-                message += f"Convergence Rate: {value:.4f}\n"
-            else:
-                message += f"{metric}: {value:.4f}\n"
-        
-        if additional_info:
-            message += f"\nAdditional Information:\n{additional_info}"
-        
-        messagebox.showinfo("Accuracy Report", message)
-    
-    def load_file(self):
-        """Load and process CSV file"""
-        file_path = filedialog.askopenfilename(
-            title="Select CSV File",
-            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
+            and c not in prv
+        ]
+
+        demand: Optional[str] = None
+        # Repository legacy convention has first priority.
+        for candidate in ("P-676", "p-676"):
+            match = next((c for c in columns if c.lower() == candidate.lower()), None)
+            if match:
+                demand = match
+                break
+        if demand is None:
+            for name in cls.DEMAND_EXACT_NAMES:
+                match = next((c for c in columns if lower[c] == name), None)
+                if match:
+                    demand = match
+                    break
+        if demand is None:
+            match = next(
+                (
+                    c for c in columns
+                    if any(token in lower[c] for token in ("demand", "deby", "flow"))
+                ),
+                None,
+            )
+            demand = match
+
+        critical = [
+            c for c in columns
+            if (
+                lower[c].startswith("j-")
+                or lower[c].startswith("critical")
+                or "critical_point" in lower[c]
+                or "critical point" in lower[c]
+            )
+            and c not in point_after
+            and c not in prv
+            and c != demand
+        ]
+
+        used = set(prv + point_after + critical + ([demand] if demand else []))
+        ignored = [c for c in columns if c not in used]
+
+        return Schema(
+            prv_columns=prv,
+            point_after_valve_columns=point_after,
+            critical_point_columns=critical,
+            demand_column=demand,
+            ignored_columns=ignored,
         )
-        
-        if not file_path:
-            return
-        
+
+    @staticmethod
+    def validate_for_critical_model(schema: Schema) -> None:
+        problems: List[str] = []
+        if not schema.point_after_valve_columns:
+            problems.append("Point After Valve columns (e.g. *-B or downstream*)")
+        if not schema.critical_point_columns:
+            problems.append("Critical Point columns (e.g. J-*)")
+        if not schema.demand_column:
+            problems.append("Demand/Deby column (legacy: P-676)")
+        if problems:
+            raise ValueError("Missing required columns: " + ", ".join(problems))
+
+    @staticmethod
+    def validate_for_pso(schema: Schema) -> None:
+        SchemaDetector.validate_for_critical_model(schema)
+        if not schema.prv_columns:
+            raise ValueError("Missing PRV columns. PSO needs historical PRV settings to train its surrogate model.")
+
+
+# -----------------------------------------------------------------------------
+# Leakage-safe ML transformers and regression service
+# -----------------------------------------------------------------------------
+
+class IQRClipper(BaseEstimator, TransformerMixin):
+    """
+    Fold-local IQR winsorizer.
+
+    Unlike row deletion, clipping is compatible with sklearn Pipeline and
+    therefore is refit independently inside each cross-validation fold. This
+    avoids the leakage caused by calculating outlier thresholds on the full
+    dataset before splitting.
+    """
+
+    def __init__(self, factor: float = 1.5):
+        self.factor = factor
+
+    def fit(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> "IQRClipper":
+        arr = np.asarray(X, dtype=float)
+        q1 = np.nanpercentile(arr, 25, axis=0)
+        q3 = np.nanpercentile(arr, 75, axis=0)
+        iqr = q3 - q1
+        # Constant columns should not be widened artificially.
+        self.lower_ = q1 - self.factor * iqr
+        self.upper_ = q3 + self.factor * iqr
+        return self
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        if not hasattr(self, "lower_"):
+            raise RuntimeError("IQRClipper must be fitted before transform().")
+        arr = np.asarray(X, dtype=float)
+        return np.clip(arr, self.lower_, self.upper_)
+
+
+class XGBoostRegressionService:
+    """Leakage-safe XGBoost training for single or multi-output regression."""
+
+    def __init__(self, config: AppConfig):
+        self.config = config
+        self.result: Optional[RegressionResult] = None
+
+    def _base_regressor(self) -> xgb.XGBRegressor:
+        return xgb.XGBRegressor(
+            objective="reg:squarederror",
+            eval_metric="rmse",
+            random_state=self.config.random_state,
+            n_jobs=1,
+            tree_method="hist",
+            verbosity=0,
+        )
+
+    def _build_pipeline(self, multi_output: bool) -> Pipeline:
+        model: Any = self._base_regressor()
+        if multi_output:
+            model = MultiOutputRegressor(model, n_jobs=1)
+
+        return Pipeline(
+            steps=[
+                ("imputer", KNNImputer(n_neighbors=self.config.knn_neighbors, weights="distance")),
+                ("iqr", IQRClipper(self.config.iqr_factor)),
+                ("model", model),
+            ]
+        )
+
+    def _param_distributions(self, multi_output: bool) -> Dict[str, Sequence[Any]]:
+        prefix = "model__estimator__" if multi_output else "model__"
+        return {
+            f"{prefix}n_estimators": [100, 160, 240, 320, 450],
+            f"{prefix}max_depth": [2, 3, 4, 5, 6, 8],
+            f"{prefix}learning_rate": [0.015, 0.03, 0.05, 0.08, 0.12],
+            f"{prefix}subsample": [0.70, 0.80, 0.90, 1.0],
+            f"{prefix}colsample_bytree": [0.70, 0.80, 0.90, 1.0],
+            f"{prefix}min_child_weight": [1, 2, 4, 6],
+            f"{prefix}reg_alpha": [0.0, 0.001, 0.01, 0.1],
+            f"{prefix}reg_lambda": [0.5, 1.0, 2.0, 5.0, 10.0],
+        }
+
+    @staticmethod
+    def _clean_numeric_frame(df: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+        out = df.loc[:, list(columns)].copy()
+        for col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+        out = out.replace([np.inf, -np.inf], np.nan)
+        return out
+
+    def train(
+        self,
+        df: pd.DataFrame,
+        feature_names: Sequence[str],
+        target_names: Sequence[str],
+        *,
+        tune: bool = True,
+    ) -> RegressionResult:
+        feature_names = list(feature_names)
+        target_names = list(target_names)
+        if not feature_names:
+            raise ValueError("At least one feature is required.")
+        if not target_names:
+            raise ValueError("At least one target is required.")
+
+        missing = [c for c in feature_names + target_names if c not in df.columns]
+        if missing:
+            raise ValueError(f"Columns not found in dataset: {missing}")
+
+        X_df = self._clean_numeric_frame(df, feature_names)
+        y_df = self._clean_numeric_frame(df, target_names)
+
+        # Targets must be observed; imputing target values would fabricate labels.
+        valid_target_mask = ~y_df.isna().any(axis=1)
+        X_df = X_df.loc[valid_target_mask]
+        y_df = y_df.loc[valid_target_mask]
+
+        # Features with no observed value cannot be imputed meaningfully.
+        all_nan_features = [c for c in feature_names if X_df[c].isna().all()]
+        if all_nan_features:
+            raise ValueError(f"Feature columns contain only missing values: {all_nan_features}")
+
+        if len(X_df) < self.config.min_training_rows:
+            raise ValueError(
+                f"Insufficient labeled rows: {len(X_df)}. "
+                f"Need at least {self.config.min_training_rows}."
+            )
+
+        if len(X_df) > self.config.max_training_rows:
+            sampled = X_df.sample(
+                self.config.max_training_rows,
+                random_state=self.config.random_state,
+            ).index
+            X_df = X_df.loc[sampled]
+            y_df = y_df.loc[sampled]
+
+        X = X_df.to_numpy(dtype=float)
+        y = y_df.to_numpy(dtype=float)
+        if len(target_names) == 1:
+            y = y.ravel()
+
+        indices = X_df.index.to_numpy()
+        X_train, X_test, y_train, y_test, idx_train, idx_test = train_test_split(
+            X,
+            y,
+            indices,
+            test_size=self.config.test_size,
+            random_state=self.config.random_state,
+            shuffle=True,
+        )
+
+        multi_output = len(target_names) > 1
+        pipeline = self._build_pipeline(multi_output)
+        start = time.perf_counter()
+        best_params: Dict[str, Any] = {}
+        best_cv_score: Optional[float] = None
+
+        max_folds = min(self.config.cv_folds, len(X_train))
+        # R² is undefined for validation folds with fewer than 2 observations.
+        cv_folds = min(max_folds, max(2, len(X_train) // 4))
+
+        if tune and len(X_train) >= 16 and cv_folds >= 2:
+            cv = KFold(
+                n_splits=cv_folds,
+                shuffle=True,
+                random_state=self.config.random_state,
+            )
+            search = RandomizedSearchCV(
+                estimator=pipeline,
+                param_distributions=self._param_distributions(multi_output),
+                n_iter=self.config.search_iterations,
+                scoring="neg_root_mean_squared_error",
+                cv=cv,
+                random_state=self.config.random_state,
+                n_jobs=-1,
+                refit=True,
+                error_score="raise",
+            )
+            search.fit(X_train, y_train)
+            fitted = search.best_estimator_
+            best_params = dict(search.best_params_)
+            best_cv_score = float(search.best_score_)
+        else:
+            fitted = pipeline
+            fitted.fit(X_train, y_train)
+
+        y_pred = fitted.predict(X_test)
+        elapsed = time.perf_counter() - start
+
+        y_test_2d = np.asarray(y_test).reshape(-1, len(target_names))
+        y_pred_2d = np.asarray(y_pred).reshape(-1, len(target_names))
+
+        overall_mae = float(mean_absolute_error(y_test_2d, y_pred_2d))
+        overall_rmse = float(math.sqrt(mean_squared_error(y_test_2d, y_pred_2d)))
         try:
-            self._start_progress("Loading data...")
-            
-            # Load data
-            raw_data = self.file_handler.load_csv(file_path)
-            
-            # Validate data
-            if len(raw_data) < self.constants.NUM_HOURS:
-                raise ValueError(
-                    f"CSV file must contain at least {self.constants.NUM_HOURS} rows for 24-hour analysis"
-                )
-            
-            if not self.data_processor.validate_columns(raw_data):
-                raise ValueError("CSV must contain PRV, Point After Valve, Critical Point, and Deby (P-676) columns")
-            
-            # Preprocess data
-            processed_data = self.data_processor.preprocess(raw_data)
-            
-            # Identify columns
-            prv_cols = [col for col in processed_data.columns if "prv" in col.lower()]
-            critical_point_cols = [col for col in processed_data.columns if col.lower().startswith("j-")]
-            point_after_valve_cols = [col for col in processed_data.columns if col.endswith("-B")]
-            deby_col = ['P-676'] if 'P-676' in processed_data.columns else []
-            
-            # Create data model
-            self.water_network_data = WaterNetworkData(
-                prv_data=processed_data[prv_cols],
-                critical_point_data=processed_data[critical_point_cols],
-                point_after_valve_data=processed_data[point_after_valve_cols],
-                deby_data=processed_data[deby_col],
-                original_data={
-                    "PRV": processed_data[prv_cols].copy(),
-                    "Critical Point": processed_data[critical_point_cols].copy(),
-                    "Point After Valve": processed_data[point_after_valve_cols].copy(),
-                    "Deby": processed_data[deby_col].copy()
+            overall_r2 = float(r2_score(y_test_2d, y_pred_2d, multioutput="uniform_average"))
+        except ValueError:
+            overall_r2 = float("nan")
+
+        nonzero = np.abs(y_test_2d) > 1e-9
+        if np.any(nonzero):
+            mape = float(np.mean(np.abs((y_test_2d[nonzero] - y_pred_2d[nonzero]) / y_test_2d[nonzero])) * 100)
+        else:
+            mape = float("nan")
+
+        per_target_rows: List[Dict[str, Any]] = []
+        for i, target in enumerate(target_names):
+            true = y_test_2d[:, i]
+            pred = y_pred_2d[:, i]
+            try:
+                target_r2 = float(r2_score(true, pred))
+            except ValueError:
+                target_r2 = float("nan")
+            per_target_rows.append(
+                {
+                    "Target": target,
+                    "MAE": float(mean_absolute_error(true, pred)),
+                    "RMSE": float(math.sqrt(mean_squared_error(true, pred))),
+                    "R2": target_r2,
                 }
             )
-            
-            # Create tabs
-            self._create_data_tabs()
-            
-            self._stop_progress()
-            messagebox.showinfo("Success", "CSV file loaded successfully")
-            self._update_status(f"Loaded: {os.path.basename(file_path)}")
-            
-        except Exception as e:
-            self._stop_progress()
-            messagebox.showerror("Error", f"Failed to load file: {str(e)}")
-            logger.error(f"Load file error: {str(e)}")
-    
-    def _create_data_tabs(self):
-        """Create tabs for each data category"""
-        # Clear existing tabs
-        for tab in self.tabs.tabs():
-            self.tabs.forget(tab)
-        
-        self.treeviews.clear()
-        self.search_vars.clear()
-        
-        # Create tabs for each data category
-        for name, df in self.water_network_data.original_data.items():
-            tab = ttk.Frame(self.tabs)
-            self.tabs.add(tab, text=name)
-            
-            # Create search frame
-            search_frame = ttk.Frame(tab)
-            search_frame.pack(fill=tk.X, padx=5, pady=5)
-            
-            ttk.Label(
-                search_frame, 
-                text=f"Search {name}:", 
-                font=self.custom_font
-            ).pack(side=tk.LEFT)
-            
-            search_var = tk.StringVar()
-            self.search_vars[name] = search_var
-            
-            search_entry = ttk.Entry(
-                search_frame, 
-                textvariable=search_var, 
-                font=self.custom_font
+
+        feature_importance = self._feature_importance(fitted, feature_names)
+        result = RegressionResult(
+            pipeline=fitted,
+            feature_names=feature_names,
+            target_names=target_names,
+            metrics={"MAE": overall_mae, "RMSE": overall_rmse, "R2": overall_r2, "MAPE": mape},
+            per_target_metrics=pd.DataFrame(per_target_rows),
+            feature_importance=feature_importance,
+            best_params=best_params,
+            best_cv_score=best_cv_score,
+            training_seconds=elapsed,
+            y_test=y_test_2d,
+            y_pred=y_pred_2d,
+            test_indices=np.asarray(idx_test),
+        )
+        self.result = result
+        logger.info(
+            "Model trained | rows=%d | features=%d | targets=%d | RMSE=%.4f | R2=%.4f",
+            len(X_df),
+            len(feature_names),
+            len(target_names),
+            overall_rmse,
+            overall_r2,
+        )
+        return result
+
+    @staticmethod
+    def _feature_importance(pipeline: Pipeline, feature_names: Sequence[str]) -> pd.DataFrame:
+        model = pipeline.named_steps["model"]
+        values: Optional[np.ndarray] = None
+        if hasattr(model, "feature_importances_"):
+            values = np.asarray(model.feature_importances_, dtype=float)
+        elif isinstance(model, MultiOutputRegressor) and getattr(model, "estimators_", None):
+            importances = [
+                np.asarray(est.feature_importances_, dtype=float)
+                for est in model.estimators_
+                if hasattr(est, "feature_importances_")
+            ]
+            if importances:
+                values = np.mean(np.vstack(importances), axis=0)
+
+        if values is None or len(values) != len(feature_names):
+            return pd.DataFrame(columns=["Feature", "Importance"])
+
+        frame = pd.DataFrame({"Feature": list(feature_names), "Importance": values})
+        return frame.sort_values("Importance", ascending=False).reset_index(drop=True)
+
+    def predict_frame(self, values: pd.DataFrame) -> pd.DataFrame:
+        if self.result is None:
+            raise RuntimeError("Model has not been trained.")
+        missing = [c for c in self.result.feature_names if c not in values.columns]
+        if missing:
+            raise ValueError(f"Prediction input is missing features: {missing}")
+        X = values.loc[:, self.result.feature_names].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+        pred = self.result.pipeline.predict(X)
+        pred = np.asarray(pred).reshape(-1, len(self.result.target_names))
+        return pd.DataFrame(pred, columns=self.result.target_names, index=values.index)
+
+    def save(self, path: str | Path) -> None:
+        if self.result is None:
+            raise RuntimeError("No trained model to save.")
+        payload = {
+            "pipeline": self.result.pipeline,
+            "feature_names": self.result.feature_names,
+            "target_names": self.result.target_names,
+            "metrics": self.result.metrics,
+        }
+        joblib.dump(payload, path)
+
+    def load(self, path: str | Path) -> None:
+        payload = joblib.load(path)
+        required = {"pipeline", "feature_names", "target_names"}
+        if not required.issubset(payload):
+            raise ValueError("Invalid model file.")
+        self.result = RegressionResult(
+            pipeline=payload["pipeline"],
+            feature_names=list(payload["feature_names"]),
+            target_names=list(payload["target_names"]),
+            metrics=dict(payload.get("metrics", {})),
+            per_target_metrics=pd.DataFrame(),
+            feature_importance=pd.DataFrame(),
+            best_params={},
+            best_cv_score=None,
+            training_seconds=0.0,
+            y_test=np.empty((0, len(payload["target_names"]))),
+            y_pred=np.empty((0, len(payload["target_names"]))),
+            test_indices=np.array([], dtype=int),
+        )
+
+
+# -----------------------------------------------------------------------------
+# Data-driven PSO optimizer
+# -----------------------------------------------------------------------------
+
+class SurrogatePSOOptimizer:
+    """
+    Optimize PRV settings against learned pressure surrogate models.
+
+    The downstream predictor is vectorized: it receives an ``(n, n_prv)``
+    matrix and returns an ``(n, n_downstream)`` matrix. An optional critical
+    predictor can extend the objective so pressure constraints are enforced at
+    critical points as well as downstream valve points.
+    """
+
+    def __init__(self, config: AppConfig):
+        self.config = config
+        self.rng = np.random.default_rng(config.random_state)
+
+    def optimize_hour(
+        self,
+        *,
+        demand: float,
+        prv_bounds: Sequence[Tuple[float, float]],
+        downstream_predictor: Callable[[np.ndarray, float], np.ndarray],
+        critical_predictor: Optional[Callable[[np.ndarray, float], np.ndarray]] = None,
+        previous_settings: Optional[np.ndarray] = None,
+        reference_settings: Optional[np.ndarray] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, float, List[float]]:
+        n_prv = len(prv_bounds)
+        if n_prv < 1:
+            raise ValueError("PSO requires at least one PRV variable.")
+
+        lower = np.array([b[0] for b in prv_bounds], dtype=float)
+        upper = np.array([b[1] for b in prv_bounds], dtype=float)
+        if np.any(~np.isfinite(lower)) or np.any(~np.isfinite(upper)):
+            raise ValueError("PRV bounds must be finite.")
+        if np.any(upper <= lower):
+            raise ValueError("Every PRV upper bound must be greater than lower bound.")
+
+        particles = self.rng.uniform(lower, upper, size=(self.config.pso_particles, n_prv))
+        if reference_settings is not None and len(reference_settings) == n_prv:
+            particles[0] = np.clip(reference_settings, lower, upper)
+        if previous_settings is not None and len(previous_settings) == n_prv and self.config.pso_particles > 1:
+            particles[1] = np.clip(previous_settings, lower, upper)
+
+        span = upper - lower
+        vmax = span * self.config.pso_velocity_fraction
+        velocities = self.rng.uniform(-vmax, vmax, size=particles.shape)
+
+        def evaluate(settings_matrix: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+            settings_matrix = np.atleast_2d(np.asarray(settings_matrix, dtype=float))
+            downstream = np.asarray(downstream_predictor(settings_matrix, demand), dtype=float)
+            if downstream.ndim == 1:
+                downstream = downstream.reshape(1, -1)
+            if downstream.shape[0] != settings_matrix.shape[0]:
+                raise ValueError("Downstream surrogate returned an unexpected number of rows.")
+            if downstream.shape[1] == 0 or np.any(~np.isfinite(downstream)):
+                return np.full(settings_matrix.shape[0], np.inf), downstream
+
+            constrained = downstream
+            if critical_predictor is not None:
+                critical = np.asarray(critical_predictor(downstream, demand), dtype=float)
+                if critical.ndim == 1:
+                    critical = critical.reshape(1, -1)
+                if critical.shape[0] != settings_matrix.shape[0]:
+                    raise ValueError("Critical-point surrogate returned an unexpected number of rows.")
+                if critical.shape[1] and np.all(np.isfinite(critical)):
+                    constrained = np.concatenate([downstream, critical], axis=1)
+
+            low_violation = np.maximum(self.config.min_pressure - constrained, 0.0)
+            high_violation = np.maximum(constrained - self.config.max_pressure, 0.0)
+            violation_penalty = self.config.pressure_violation_weight * np.mean(
+                low_violation ** 2 + high_violation ** 2, axis=1
             )
-            search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-            
-            search_var.trace_add('write', lambda *args, n=name: self.filter_treeview(n))
-            
-            # Create treeview
-            tree_frame = ttk.Frame(tab)
-            tree_frame.pack(fill=tk.BOTH, expand=True)
-            
-            x_scroll = ttk.Scrollbar(tree_frame, orient="horizontal")
-            y_scroll = ttk.Scrollbar(tree_frame, orient="vertical")
-            
-            tree = ttk.Treeview(
-                tree_frame, 
-                columns=list(df.columns), 
-                show='headings', 
-                selectmode='browse',
-                xscrollcommand=x_scroll.set, 
-                yscrollcommand=y_scroll.set
+            target_penalty = self.config.pressure_target_weight * np.mean(
+                (constrained - self.config.target_pressure) ** 2, axis=1
             )
-            
-            self.treeviews[name] = tree
-            
-            x_scroll.config(command=tree.xview)
-            y_scroll.config(command=tree.yview)
-            
-            x_scroll.pack(side=tk.BOTTOM, fill=tk.X)
-            y_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-            tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-            
-            # Configure columns
-            for col in df.columns:
-                tree.heading(col, text=col)
-                max_width = max([len(str(x)) for x in df[col]] + [len(col)]) * 10
-                tree.column(col, width=max_width, anchor='center', stretch=True)
-            
-            # Insert data
-            for _, row in df.iterrows():
-                tree.insert("", "end", values=list(row))
-            
-            # Bind double-click for editing
-            tree.bind('<Double-1>', self.on_double_click)
-    
-    def filter_treeview(self, element_type: str):
-        """Filter treeview based on search text"""
-        search_text = self.search_vars[element_type].get().lower()
-        tree = self.treeviews[element_type]
-        
-        tree.delete(*tree.get_children())
-        
-        for _, row in self.water_network_data.original_data[element_type].iterrows():
-            if any(search_text in str(item).lower() for item in row):
-                tree.insert("", "end", values=list(row))
-    
-    def on_double_click(self, event):
-        """Handle double-click on treeview for editing"""
-        tree = event.widget
-        region = tree.identify("region", event.x, event.y)
-        
+
+            stability_penalty = np.zeros(settings_matrix.shape[0], dtype=float)
+            if previous_settings is not None:
+                stability_penalty = self.config.stability_weight * np.mean(
+                    (settings_matrix - previous_settings) ** 2, axis=1
+                )
+
+            reference_penalty = np.zeros(settings_matrix.shape[0], dtype=float)
+            if reference_settings is not None:
+                reference_penalty = self.config.reference_weight * np.mean(
+                    (settings_matrix - reference_settings) ** 2, axis=1
+                )
+
+            scores = violation_penalty + target_penalty + stability_penalty + reference_penalty
+            return scores.astype(float), downstream
+
+        pbest = particles.copy()
+        pbest_scores, _ = evaluate(particles)
+        g_idx = int(np.argmin(pbest_scores))
+        gbest = pbest[g_idx].copy()
+        gbest_score = float(pbest_scores[g_idx])
+        history = [gbest_score]
+
+        for iteration in range(self.config.pso_iterations):
+            progress = iteration / max(1, self.config.pso_iterations - 1)
+            inertia = self.config.pso_w_max - (
+                self.config.pso_w_max - self.config.pso_w_min
+            ) * progress
+
+            r1 = self.rng.random(size=particles.shape)
+            r2 = self.rng.random(size=particles.shape)
+            velocities = (
+                inertia * velocities
+                + self.config.pso_c1 * r1 * (pbest - particles)
+                + self.config.pso_c2 * r2 * (gbest - particles)
+            )
+            velocities = np.clip(velocities, -vmax, vmax)
+            particles = np.clip(particles + velocities, lower, upper)
+
+            scores, _ = evaluate(particles)
+            improved = scores < pbest_scores
+            if np.any(improved):
+                pbest[improved] = particles[improved]
+                pbest_scores[improved] = scores[improved]
+                candidate_idx = int(np.argmin(pbest_scores))
+                candidate_score = float(pbest_scores[candidate_idx])
+                if candidate_score < gbest_score:
+                    gbest_score = candidate_score
+                    gbest = pbest[candidate_idx].copy()
+            history.append(gbest_score)
+
+        _, downstream_final = evaluate(gbest.reshape(1, -1))
+        return gbest, downstream_final[0], gbest_score, history
+
+
+# -----------------------------------------------------------------------------
+# Optional WNTR integration for real INP files
+# -----------------------------------------------------------------------------
+
+class WNTRService:
+    @staticmethod
+    def available() -> bool:
+        return wntr is not None
+
+    @staticmethod
+    def simulate_pressures(
+        inp_path: str | Path,
+        node_names: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        if wntr is None:
+            raise RuntimeError("WNTR is not installed. Install it with: pip install wntr")
+        inp_path = Path(inp_path)
+        if not inp_path.is_file():
+            raise FileNotFoundError(inp_path)
+
+        network = wntr.network.WaterNetworkModel(str(inp_path))
+        simulator = wntr.sim.EpanetSimulator(network)
+        results = simulator.run_sim()
+        pressure = results.node["pressure"].copy()
+
+        if node_names:
+            existing = [n for n in node_names if n in pressure.columns]
+            if not existing:
+                raise ValueError("None of the requested critical-point IDs exist in the INP network.")
+            pressure = pressure.loc[:, existing]
+
+        # WNTR index is simulation time in seconds; expose hours for readability.
+        pressure.index = pressure.index.astype(float) / 3600.0
+        pressure.index.name = "Hour"
+        return pressure
+
+
+# -----------------------------------------------------------------------------
+# Plot utilities
+# -----------------------------------------------------------------------------
+
+class PlotFactory:
+    @staticmethod
+    def actual_vs_predicted(result: RegressionResult) -> plt.Figure:
+        n_targets = len(result.target_names)
+        cols = min(2, n_targets)
+        rows = math.ceil(n_targets / cols)
+        fig, axes = plt.subplots(rows, cols, figsize=(7 * cols, 5 * rows), squeeze=False)
+        axes_flat = axes.ravel()
+
+        for i, target in enumerate(result.target_names):
+            ax = axes_flat[i]
+            actual = result.y_test[:, i]
+            predicted = result.y_pred[:, i]
+            ax.scatter(actual, predicted, alpha=0.70)
+            min_val = float(np.nanmin([actual.min(), predicted.min()]))
+            max_val = float(np.nanmax([actual.max(), predicted.max()]))
+            ax.plot([min_val, max_val], [min_val, max_val], linestyle="--")
+            metric_row = result.per_target_metrics[result.per_target_metrics["Target"] == target]
+            r2 = float(metric_row["R2"].iloc[0]) if not metric_row.empty else float("nan")
+            ax.set_title(f"{target} | R²={r2:.3f}")
+            ax.set_xlabel("Actual")
+            ax.set_ylabel("Predicted")
+            ax.grid(alpha=0.25)
+
+        for i in range(n_targets, len(axes_flat)):
+            axes_flat[i].axis("off")
+        fig.suptitle("Hold-out Evaluation: Actual vs Predicted", fontsize=14)
+        fig.tight_layout()
+        return fig
+
+    @staticmethod
+    def feature_importance(result: RegressionResult) -> plt.Figure:
+        data = result.feature_importance.head(20).sort_values("Importance", ascending=True)
+        fig, ax = plt.subplots(figsize=(9, max(4.5, len(data) * 0.38)))
+        if data.empty:
+            ax.text(0.5, 0.5, "Feature importance unavailable", ha="center", va="center")
+            ax.axis("off")
+        else:
+            ax.barh(data["Feature"], data["Importance"])
+            ax.set_xlabel("Importance")
+            ax.set_title("XGBoost Feature Importance")
+            ax.grid(axis="x", alpha=0.25)
+        fig.tight_layout()
+        return fig
+
+    @staticmethod
+    def pso_summary(result: OptimizationResult, config: AppConfig) -> plt.Figure:
+        hours = [x.hour for x in result.hours]
+        mean_down = [float(np.mean(x.downstream_pressures)) for x in result.hours]
+        min_down = [float(np.min(x.downstream_pressures)) for x in result.hours]
+        max_down = [float(np.max(x.downstream_pressures)) for x in result.hours]
+
+        fig, ax = plt.subplots(figsize=(11, 6))
+        ax.plot(hours, mean_down, marker="o", label="Mean downstream pressure")
+        ax.plot(hours, min_down, linestyle="--", label="Minimum downstream pressure")
+        ax.plot(hours, max_down, linestyle="--", label="Maximum downstream pressure")
+        ax.axhline(config.min_pressure, linestyle=":", label="Minimum allowed")
+        ax.axhline(config.max_pressure, linestyle=":", label="Maximum allowed")
+        ax.axhline(config.target_pressure, linestyle="-.", label="Target pressure")
+        ax.set_xlabel("Hour")
+        ax.set_ylabel("Pressure")
+        ax.set_title("PSO Surrogate Optimization Summary")
+        ax.grid(alpha=0.25)
+        ax.legend()
+        fig.tight_layout()
+        return fig
+
+    @staticmethod
+    def pso_convergence(hour_result: PSOHourResult) -> plt.Figure:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(range(len(hour_result.convergence)), hour_result.convergence)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Objective")
+        ax.set_title(f"PSO Convergence - Hour {hour_result.hour}")
+        ax.grid(alpha=0.25)
+        fig.tight_layout()
+        return fig
+
+    @staticmethod
+    def descriptive_boxplot(df: pd.DataFrame, title: str) -> plt.Figure:
+        numeric = df.apply(pd.to_numeric, errors="coerce")
+        fig, ax = plt.subplots(figsize=(max(9, len(numeric.columns) * 0.8), 5.5))
+        numeric.boxplot(ax=ax, rot=45)
+        ax.set_title(title)
+        ax.set_ylabel("Value")
+        ax.grid(alpha=0.25)
+        fig.tight_layout()
+        return fig
+
+
+# -----------------------------------------------------------------------------
+# GUI
+# -----------------------------------------------------------------------------
+
+class WaterNetworkApp:
+    """Tkinter desktop application."""
+
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.config = AppConfig()
+        self.data: Optional[WaterNetworkData] = None
+
+        # Separate model roles prevent accidental feature-space mismatch.
+        self.critical_model = XGBoostRegressionService(self.config)
+        self.downstream_model = XGBoostRegressionService(self.config)
+        self.pso = SurrogatePSOOptimizer(self.config)
+        self.optimization_result: Optional[OptimizationResult] = None
+
+        self._current_plot: Optional[plt.Figure] = None
+        self._working = False
+        self._table_column_order: List[str] = []
+
+        self._configure_root()
+        self._configure_style()
+        self._build_menu()
+        self._build_layout()
+        self._set_status("Ready. Load a CSV dataset to begin.")
+
+    # --------------------------- UI construction ---------------------------
+
+    def _configure_root(self) -> None:
+        self.root.title("Water Network AI Analyzer - Professional Edition v5.0")
+        self.root.geometry("1380x860")
+        self.root.minsize(1080, 700)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _configure_style(self) -> None:
+        style = ttk.Style()
+        if "vista" in style.theme_names():
+            style.theme_use("vista")
+        style.configure("Title.TLabel", font=("Segoe UI", 17, "bold"))
+        style.configure("Subtitle.TLabel", font=("Segoe UI", 10))
+        style.configure("Section.TLabel", font=("Segoe UI", 11, "bold"))
+        style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"))
+        style.configure("Treeview", rowheight=25)
+
+    def _build_menu(self) -> None:
+        menubar = tk.Menu(self.root)
+
+        file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label="Load CSV", command=self.load_csv)
+        file_menu.add_command(label="Save Dataset", command=self.save_dataset)
+        file_menu.add_separator()
+        file_menu.add_command(label="Save Critical Model", command=self.save_critical_model)
+        file_menu.add_command(label="Load Critical Model", command=self.load_critical_model)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self._on_close)
+        menubar.add_cascade(label="File", menu=file_menu)
+
+        model_menu = tk.Menu(menubar, tearoff=False)
+        model_menu.add_command(label="Train Critical-Point Model", command=self.train_critical_model)
+        model_menu.add_command(label="Predict Critical Points", command=self.predict_critical_points_dialog)
+        model_menu.add_command(label="Show Model Evaluation", command=self.show_model_evaluation)
+        menubar.add_cascade(label="Machine Learning", menu=model_menu)
+
+        optimization_menu = tk.Menu(menubar, tearoff=False)
+        optimization_menu.add_command(label="Run PRV Optimization", command=self.run_pso)
+        optimization_menu.add_command(label="Export Optimization CSV", command=self.export_optimization)
+        menubar.add_cascade(label="Optimization", menu=optimization_menu)
+
+        simulation_menu = tk.Menu(menubar, tearoff=False)
+        simulation_menu.add_command(label="Run WNTR / EPANET INP", command=self.run_wntr_dialog)
+        menubar.add_cascade(label="Hydraulics", menu=simulation_menu)
+
+        help_menu = tk.Menu(menubar, tearoff=False)
+        help_menu.add_command(label="About", command=self.show_about)
+        menubar.add_cascade(label="Help", menu=help_menu)
+
+        self.root.config(menu=menubar)
+
+    def _build_layout(self) -> None:
+        header = ttk.Frame(self.root, padding=(16, 12))
+        header.pack(fill=tk.X)
+        ttk.Label(header, text="Water Network AI Analyzer", style="Title.TLabel").pack(side=tk.LEFT)
+        ttk.Label(
+            header,
+            text="Leakage-safe ML · Surrogate PSO · Optional WNTR",
+            style="Subtitle.TLabel",
+        ).pack(side=tk.LEFT, padx=(18, 0), pady=(6, 0))
+
+        toolbar = ttk.Frame(self.root, padding=(16, 0, 16, 10))
+        toolbar.pack(fill=tk.X)
+        for label, command in [
+            ("Load CSV", self.load_csv),
+            ("Save CSV", self.save_dataset),
+            ("Train Critical Model", self.train_critical_model),
+            ("Predict", self.predict_critical_points_dialog),
+            ("Run PSO", self.run_pso),
+            ("Analyze Downstream", self.analyze_downstream),
+            ("WNTR INP", self.run_wntr_dialog),
+        ]:
+            ttk.Button(toolbar, text=label, command=command).pack(side=tk.LEFT, padx=(0, 8))
+
+        self.progress = ttk.Progressbar(toolbar, mode="indeterminate", length=180)
+        self.progress.pack(side=tk.RIGHT)
+
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 10))
+
+        self.overview_tab = ttk.Frame(self.notebook)
+        self.data_tab = ttk.Frame(self.notebook)
+        self.model_tab = ttk.Frame(self.notebook)
+        self.optimization_tab = ttk.Frame(self.notebook)
+        self.log_tab = ttk.Frame(self.notebook)
+
+        self.notebook.add(self.overview_tab, text="Overview")
+        self.notebook.add(self.data_tab, text="Data")
+        self.notebook.add(self.model_tab, text="Model")
+        self.notebook.add(self.optimization_tab, text="Optimization")
+        self.notebook.add(self.log_tab, text="Log")
+
+        self._build_overview_tab()
+        self._build_data_tab()
+        self._build_model_tab()
+        self._build_optimization_tab()
+        self._build_log_tab()
+
+        status_frame = ttk.Frame(self.root, padding=(16, 0, 16, 10))
+        status_frame.pack(fill=tk.X)
+        self.status_var = tk.StringVar()
+        ttk.Label(status_frame, textvariable=self.status_var).pack(side=tk.LEFT)
+
+    def _build_overview_tab(self) -> None:
+        container = ttk.Frame(self.overview_tab, padding=16)
+        container.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(container, text="Dataset & Schema", style="Section.TLabel").pack(anchor="w")
+        self.overview_text = tk.Text(container, wrap=tk.WORD, height=20, font=("Consolas", 10))
+        self.overview_text.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.overview_text.configure(state=tk.DISABLED)
+
+    def _build_data_tab(self) -> None:
+        controls = ttk.Frame(self.data_tab, padding=(10, 10, 10, 4))
+        controls.pack(fill=tk.X)
+        ttk.Label(controls, text="Filter rows:").pack(side=tk.LEFT)
+        self.filter_var = tk.StringVar()
+        entry = ttk.Entry(controls, textvariable=self.filter_var, width=35)
+        entry.pack(side=tk.LEFT, padx=(8, 8))
+        entry.bind("<KeyRelease>", lambda _event: self._populate_data_table())
+        ttk.Label(controls, text="Double-click a cell to edit.").pack(side=tk.LEFT, padx=(12, 0))
+
+        frame = ttk.Frame(self.data_tab, padding=(10, 4, 10, 10))
+        frame.pack(fill=tk.BOTH, expand=True)
+        self.data_tree = ttk.Treeview(frame, show="headings")
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.data_tree.yview)
+        hsb = ttk.Scrollbar(frame, orient="horizontal", command=self.data_tree.xview)
+        self.data_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.data_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        self.data_tree.bind("<Double-1>", self._edit_cell)
+
+    def _build_model_tab(self) -> None:
+        top = ttk.Frame(self.model_tab, padding=12)
+        top.pack(fill=tk.X)
+        ttk.Button(top, text="Train / Retrain", command=self.train_critical_model).pack(side=tk.LEFT)
+        ttk.Button(top, text="Evaluation Plot", command=self.show_model_evaluation).pack(side=tk.LEFT, padx=8)
+        ttk.Button(top, text="Feature Importance", command=self.show_feature_importance).pack(side=tk.LEFT)
+
+        body = ttk.Panedwindow(self.model_tab, orient=tk.HORIZONTAL)
+        body.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+
+        left = ttk.Frame(body)
+        right = ttk.Frame(body)
+        body.add(left, weight=1)
+        body.add(right, weight=2)
+
+        ttk.Label(left, text="Metrics", style="Section.TLabel").pack(anchor="w", pady=(0, 6))
+        self.metrics_tree = ttk.Treeview(left, columns=("Metric", "Value"), show="headings", height=12)
+        self.metrics_tree.heading("Metric", text="Metric")
+        self.metrics_tree.heading("Value", text="Value")
+        self.metrics_tree.column("Metric", width=160)
+        self.metrics_tree.column("Value", width=140)
+        self.metrics_tree.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(right, text="Per-target Evaluation / Model Details", style="Section.TLabel").pack(anchor="w", pady=(0, 6))
+        self.model_text = tk.Text(right, wrap=tk.WORD, font=("Consolas", 10))
+        self.model_text.pack(fill=tk.BOTH, expand=True)
+        self.model_text.configure(state=tk.DISABLED)
+
+    def _build_optimization_tab(self) -> None:
+        top = ttk.Frame(self.optimization_tab, padding=12)
+        top.pack(fill=tk.X)
+        ttk.Button(top, text="Run PSO", command=self.run_pso).pack(side=tk.LEFT)
+        ttk.Button(top, text="Optimization Plot", command=self.show_optimization_plot).pack(side=tk.LEFT, padx=8)
+        ttk.Button(top, text="Convergence", command=self.show_convergence_dialog).pack(side=tk.LEFT)
+        ttk.Button(top, text="Export CSV", command=self.export_optimization).pack(side=tk.LEFT, padx=8)
+
+        frame = ttk.Frame(self.optimization_tab, padding=(12, 0, 12, 12))
+        frame.pack(fill=tk.BOTH, expand=True)
+        cols = ("Hour", "Demand", "Objective", "DownMin", "DownMean", "DownMax", "CriticalMin")
+        self.optim_tree = ttk.Treeview(frame, columns=cols, show="headings")
+        for col in cols:
+            self.optim_tree.heading(col, text=col)
+            self.optim_tree.column(col, width=120, anchor="center")
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.optim_tree.yview)
+        hsb = ttk.Scrollbar(frame, orient="horizontal", command=self.optim_tree.xview)
+        self.optim_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.optim_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+
+    def _build_log_tab(self) -> None:
+        frame = ttk.Frame(self.log_tab, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+        self.log_text = tk.Text(frame, wrap=tk.WORD, font=("Consolas", 9))
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.log_text.insert(tk.END, f"Log file: {Path(LOG_FILE).resolve()}\n")
+        self.log_text.configure(state=tk.DISABLED)
+
+    # --------------------------- generic helpers ---------------------------
+
+    def _set_status(self, text: str) -> None:
+        self.status_var.set(text)
+        self._append_log(text)
+
+    def _append_log(self, text: str) -> None:
+        if not hasattr(self, "log_text"):
+            return
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_text.configure(state=tk.NORMAL)
+        self.log_text.insert(tk.END, f"[{timestamp}] {text}\n")
+        self.log_text.see(tk.END)
+        self.log_text.configure(state=tk.DISABLED)
+
+    def _set_working(self, working: bool, status: Optional[str] = None) -> None:
+        self._working = working
+        if working:
+            self.progress.start(12)
+        else:
+            self.progress.stop()
+        if status:
+            self._set_status(status)
+
+    def _run_task(
+        self,
+        label: str,
+        function: Callable[[], Any],
+        on_success: Callable[[Any], None],
+    ) -> None:
+        if self._working:
+            messagebox.showinfo("Busy", "Another operation is still running.")
+            return
+        self._set_working(True, label)
+
+        def worker() -> None:
+            try:
+                value = function()
+            except Exception as exc:  # keep Tk calls on main thread
+                logger.exception("Background task failed: %s", label)
+                self.root.after(0, lambda exc=exc, label=label: self._task_error(label, exc))
+                return
+            self.root.after(0, lambda value=value, cb=on_success: self._task_success(cb, value))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _task_error(self, label: str, exc: Exception) -> None:
+        self._set_working(False, f"Failed: {label}")
+        messagebox.showerror("Error", f"{label}\n\n{type(exc).__name__}: {exc}")
+
+    def _task_success(self, callback: Callable[[Any], None], value: Any) -> None:
+        try:
+            callback(value)
+        finally:
+            self._set_working(False)
+
+    def _require_data(self) -> WaterNetworkData:
+        if self.data is None:
+            raise RuntimeError("Load a CSV dataset first.")
+        return self.data
+
+    @staticmethod
+    def _numeric(df: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+        out = df.loc[:, list(columns)].copy()
+        for c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+        return out.replace([np.inf, -np.inf], np.nan)
+
+    # --------------------------- data actions ---------------------------
+
+    def load_csv(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select Water Network CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            raw = CSVService.load(path)
+            schema = SchemaDetector.detect(raw)
+            self.data = WaterNetworkData(raw=raw, schema=schema, source_path=Path(path))
+            self.critical_model = XGBoostRegressionService(self.config)
+            self.downstream_model = XGBoostRegressionService(self.config)
+            self.optimization_result = None
+            self._refresh_all()
+            self._set_status(f"Loaded {Path(path).name}: {len(raw)} rows x {len(raw.columns)} columns")
+        except Exception as exc:
+            logger.exception("Load CSV failed")
+            messagebox.showerror("Load Error", str(exc))
+
+    def save_dataset(self) -> None:
+        if self.data is None:
+            messagebox.showerror("Error", "Load a dataset first.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save Dataset",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+        )
+        if not path:
+            return
+        try:
+            CSVService.save(self.data.raw, path)
+            self._set_status(f"Saved dataset: {Path(path).name}")
+        except Exception as exc:
+            messagebox.showerror("Save Error", str(exc))
+
+    def _refresh_all(self) -> None:
+        self._refresh_overview()
+        self._populate_data_table()
+        self._refresh_model_view()
+        self._refresh_optimization_view()
+
+    def _refresh_overview(self) -> None:
+        self.overview_text.configure(state=tk.NORMAL)
+        self.overview_text.delete("1.0", tk.END)
+        if self.data is None:
+            self.overview_text.insert(tk.END, "No dataset loaded.")
+        else:
+            raw = self.data.raw
+            schema = self.data.schema
+            numeric = raw.apply(pd.to_numeric, errors="coerce")
+            missing = int(numeric.isna().sum().sum())
+            content = [
+                f"Source: {self.data.source_path or 'In-memory'}",
+                f"Shape: {len(raw)} rows x {len(raw.columns)} columns",
+                f"Numeric/missing cells after coercion: {missing}",
+                "",
+                "Detected schema",
+                "---------------",
+                f"PRV columns ({len(schema.prv_columns)}): {schema.prv_columns}",
+                f"Point After Valve ({len(schema.point_after_valve_columns)}): {schema.point_after_valve_columns}",
+                f"Critical Point ({len(schema.critical_point_columns)}): {schema.critical_point_columns}",
+                f"Demand/Deby: {schema.demand_column}",
+                f"Other columns ({len(schema.ignored_columns)}): {schema.ignored_columns}",
+                "",
+                "Model roles",
+                "-----------",
+                "Critical model: [Point After Valve + Demand] -> [Critical Points]",
+                "PSO surrogate: [PRV settings + Demand] -> [Point After Valve pressures]",
+                "PSO uses the learned surrogate; it is not a hydraulic solver.",
+                "WNTR/EPANET is used only when a real INP file is supplied.",
+            ]
+            self.overview_text.insert(tk.END, "\n".join(content))
+        self.overview_text.configure(state=tk.DISABLED)
+
+    def _populate_data_table(self) -> None:
+        for item in self.data_tree.get_children():
+            self.data_tree.delete(item)
+        if self.data is None:
+            return
+
+        df = self.data.raw
+        query = self.filter_var.get().strip().lower() if hasattr(self, "filter_var") else ""
+        display = df
+        if query:
+            mask = df.astype(str).apply(lambda col: col.str.lower().str.contains(query, na=False)).any(axis=1)
+            display = df.loc[mask]
+
+        self._table_column_order = list(df.columns)
+        self.data_tree.configure(columns=self._table_column_order)
+        for col in self._table_column_order:
+            self.data_tree.heading(col, text=col)
+            self.data_tree.column(col, width=120, minwidth=80, anchor="center", stretch=False)
+
+        for idx, row in display.head(5000).iterrows():
+            values = ["" if pd.isna(row[c]) else row[c] for c in self._table_column_order]
+            self.data_tree.insert("", "end", iid=str(idx), values=values)
+
+    def _edit_cell(self, event: tk.Event) -> None:
+        if self.data is None:
+            return
+        region = self.data_tree.identify("region", event.x, event.y)
         if region != "cell":
             return
-        
-        row_id = tree.identify_row(event.y)
-        column = tree.identify_column(event.x)
-        
-        x, y, width, height = tree.bbox(row_id, column)
-        value = tree.set(row_id, column)
-        
-        edit_window = tk.Toplevel(self.root)
-        edit_window.geometry(
-            f"{width+10}x{height+10}+{self.root.winfo_rootx()+x}+{self.root.winfo_rooty()+y}"
-        )
-        edit_window.overrideredirect(True)
-        
-        entry = ttk.Entry(edit_window, font=self.custom_font)
-        entry.insert(0, value)
-        entry.focus()
-        entry.select_range(0, tk.END)
-        entry.pack(padx=2, pady=2)
-        
-        def save_edit(event=None):
-            new_value = entry.get()
-            col = int(column.replace('#', '')) - 1
-            active_tab = self.tabs.tab(self.tabs.select(), "text")
-            col_name = self.water_network_data.original_data[active_tab].columns[col]
-            
-            try:
-                value = float(new_value)
-                
-                if col_name.lower().startswith("prv") and not (
-                    self.constants.MIN_PRESSURE <= value <= self.constants.MAX_PRESSURE
-                ):
-                    messagebox.showerror(
-                        "Error", 
-                        f"Value in '{col_name}' must be between {self.constants.MIN_PRESSURE} and {self.constants.MAX_PRESSURE}"
-                    )
-                    entry.focus()
-                    return
-                
-                if col_name.lower().startswith("p-") or col_name.lower().startswith("j-"):
-                    try:
-                        value = float(new_value)
-                    except ValueError:
-                        messagebox.showerror("Error", f"Value in '{col_name}' must be numeric")
-                        entry.focus()
-                        return
-                
-            except ValueError:
-                messagebox.showerror("Error", f"Value in '{col_name}' must be numeric")
-                entry.focus()
-                return
-            
-            values = list(tree.item(row_id, 'values'))
-            values[col] = new_value
-            tree.item(row_id, values=values)
-            edit_window.destroy()
-        
-        entry.bind('<Return>', save_edit)
-        entry.bind('<FocusOut>', save_edit)
-    
-    def undo_changes(self):
-        """Revert all changes to original data"""
-        if not self.water_network_data:
-            messagebox.showerror("Error", "No data loaded")
+        item_id = self.data_tree.identify_row(event.y)
+        column_id = self.data_tree.identify_column(event.x)
+        if not item_id or not column_id:
             return
-        
-        for name, tree in self.treeviews.items():
-            tree.delete(*tree.get_children())
-            for _, row in self.water_network_data.original_data[name].iterrows():
-                tree.insert("", "end", values=list(row))
-        
-        messagebox.showinfo("Success", "All changes have been reverted")
-        self._update_status("Changes reverted to original data")
-    
-    def save_file(self):
-        """Save all data to a CSV file"""
-        if not self.water_network_data:
-            messagebox.showerror("Error", "No data loaded")
+        col_index = int(column_id[1:]) - 1
+        if col_index >= len(self._table_column_order):
             return
-        
-        file_path = filedialog.asksaveasfilename(
-            title="Save CSV File",
-            defaultextension=".csv",
-            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
-        )
-        
-        if not file_path:
-            return
-        
+        column_name = self._table_column_order[col_index]
         try:
-            # Combine all dataframes
-            combined_df = pd.concat([
-                df for df in self.water_network_data.original_data.values() 
-                if not df.empty
-            ], axis=1)
-            
-            self.file_handler.save_csv(combined_df, file_path)
-            messagebox.showinfo("Success", f"File saved to {file_path}")
-            self._update_status(f"Saved: {os.path.basename(file_path)}")
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to save file: {str(e)}")
-            logger.error(f"Save file error: {str(e)}")
-    
-    def extract_deby(self):
-        """Extract Deby data to CSV file"""
-        if not self.water_network_data or self.water_network_data.deby_data.empty:
-            messagebox.showerror("Error", "Deby data not found")
+            df_index: Any = int(item_id) if item_id.isdigit() and int(item_id) in self.data.raw.index else item_id
+            current = self.data.raw.at[df_index, column_name]
+        except Exception:
             return
-        
-        file_path = filedialog.asksaveasfilename(
-            title="Save Deby Data",
-            defaultextension=".csv",
-            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
-        )
-        
-        if not file_path:
+
+        value = simpledialog.askstring("Edit Cell", f"{column_name}", initialvalue=str(current))
+        if value is None:
             return
-        
+        self.data.raw.at[df_index, column_name] = value
+        # Data changes invalidate trained models and optimization results.
+        self.critical_model = XGBoostRegressionService(self.config)
+        self.downstream_model = XGBoostRegressionService(self.config)
+        self.optimization_result = None
+        self._refresh_all()
+        self._set_status(f"Edited row {df_index}, column {column_name}. Models invalidated.")
+
+    # --------------------------- ML actions ---------------------------
+
+    def train_critical_model(self) -> None:
         try:
-            self.file_handler.save_csv(self.water_network_data.deby_data, file_path)
-            messagebox.showinfo("Success", f"Deby data saved to {file_path}")
-            self._update_status(f"Deby data saved: {os.path.basename(file_path)}")
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to save Deby data: {str(e)}")
-            logger.error(f"Extract Deby error: {str(e)}")
-    
-    def analyze_point_after_valve(self):
-        """Analyze Point After Valve data and show statistics"""
-        if not self.water_network_data or self.water_network_data.point_after_valve_data.empty:
-            messagebox.showerror("Error", "No Point After Valve data found")
+            data = self._require_data()
+            SchemaDetector.validate_for_critical_model(data.schema)
+            features = data.schema.point_after_valve_columns + [data.schema.demand_column]  # type: ignore[list-item]
+            targets = data.schema.critical_point_columns
+        except Exception as exc:
+            messagebox.showerror("Cannot Train", str(exc))
             return
-        
-        try:
-            data = self.water_network_data.point_after_valve_data
-            
-            # Create statistics window
-            stats_window = tk.Toplevel(self.root)
-            stats_window.title("Point After Valve Analysis")
-            stats_window.geometry("800x600")
-            stats_window.configure(bg="#f0f0f0")
-            
-            # Title
-            ttk.Label(
-                stats_window, 
-                text="Point After Valve Analysis", 
-                font=self.title_font
-            ).pack(pady=10)
-            
-            # Statistics text
-            stats_text = tk.Text(stats_window, wrap=tk.WORD, font=self.custom_font)
-            stats_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-            
-            stats_text.insert(tk.END, "Descriptive Statistics:\n\n")
-            stats_text.insert(tk.END, data.describe().to_string())
-            
-            # Create and show boxplot
-            box_plot = self.plot_generator.create_boxplot(
-                data, 
-                "Point After Valve Data Distribution"
+
+        def task() -> RegressionResult:
+            return self.critical_model.train(data.raw, features, targets, tune=True)
+
+        def done(result: RegressionResult) -> None:
+            self._refresh_model_view()
+            self.notebook.select(self.model_tab)
+            self._set_status(
+                f"Critical model trained | R²={result.metrics['R2']:.3f} | RMSE={result.metrics['RMSE']:.3f}"
             )
-            self.plot_generator.show_plot(box_plot, "Point After Valve Boxplot")
-            
-            # Save data button
-            def save_data():
-                file_path = filedialog.asksaveasfilename(
-                    title="Save Point After Valve Data",
-                    defaultextension=".csv",
-                    filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
-                )
-                
-                if file_path:
-                    try:
-                        self.file_handler.save_csv(data, file_path)
-                        messagebox.showinfo("Success", f"Data saved to {file_path}")
-                    except Exception as e:
-                        messagebox.showerror("Error", f"Failed to save data: {str(e)}")
-            
-            ttk.Button(
-                stats_window, 
-                text="Save Data", 
-                command=save_data
-            ).pack(pady=10)
-            
-            self._update_status("Point After Valve analysis completed")
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to analyze Point After Valve: {str(e)}")
-            logger.error(f"Analyze Point After Valve error: {str(e)}")
-    
-    def predict_pressures(self):
-        """Predict pressures using XGBoost model and show accuracy"""
-        if not self.water_network_data:
-            messagebox.showerror("Error", "No data loaded")
-            return
-        
-        try:
-            self._start_progress("Predicting pressures...")
-            
-            # Prepare data
-            prv_data = self.water_network_data.prv_data.apply(pd.to_numeric, errors='coerce')
-            deby_data = self.water_network_data.deby_data.apply(pd.to_numeric, errors='coerce')
-            
-            # Preprocess data
-            prv_data = pd.DataFrame(
-                KNNImputer(n_neighbors=self.constants.N_NEIGHBORS_IMPUTER).fit_transform(prv_data),
-                columns=prv_data.columns
-            )
-            deby_data = pd.DataFrame(
-                KNNImputer(n_neighbors=self.constants.N_NEIGHBORS_IMPUTER).fit_transform(deby_data),
-                columns=deby_data.columns
-            )
-            
-            data = pd.concat([prv_data, deby_data], axis=1, join='inner')
-            
-            if data.empty:
-                raise ValueError("No overlapping data between PRV and Deby")
-            
-            # Remove outliers
-            Q1 = data.quantile(0.25)
-            Q3 = data.quantile(0.75)
-            IQR = Q3 - Q1
-            
-            data_no_outliers = data[~(
-                (data < (Q1 - self.constants.OUTLIER_THRESHOLD * IQR)) | 
-                (data > (Q3 + self.constants.OUTLIER_THRESHOLD * IQR))
-            ).any(axis=1)]
-            
-            if data_no_outliers.empty or data_no_outliers.shape[1] < 2:
-                raise ValueError("Insufficient data for pressure prediction")
-            
-            X = data_no_outliers.drop(columns=['P-676']).to_numpy(dtype=float)
-            y = data_no_outliers['P-676'].to_numpy(dtype=float)
-            
-            # Train model
-            self.model_results = self.model_trainer.train(X, y)
-            
-            # Make predictions
-            y_pred = self.model_results.model.predict(X)
-            
-            # Calculate additional accuracy metrics
-            rmse = np.sqrt(np.mean((y - y_pred) ** 2))
-            mape = np.mean(np.abs((y - y_pred) / y)) * 100
-            
-            # Create and show scatter plot
-            scatter_plot = self.plot_generator.create_scatter_plot(
-                y, y_pred,
-                "Actual vs Predicted Pressures",
-                "Actual Pressure",
-                "Predicted Pressure"
-            )
-            self.plot_generator.show_plot(scatter_plot, "Pressure Predictions")
-            
-            # Show accuracy metrics
-            metrics = {
-                'mae': self.model_results.metrics['mae'],
-                'r2': self.model_results.metrics['r2'],
-                'rmse': rmse,
-                'mape': mape,
-                'training_time': self.model_results.training_time
-            }
-            
-            additional_info = (
-                f"Data Points: {len(y)}\n"
-                f"Pressure Range: {y.min():.2f} - {y.max():.2f} meters\n"
-                f"Prediction Range: {y_pred.min():.2f} - {y_pred.max():.2f} meters\n"
-                f"Best Hyperparameters: {self.model_results.hyperparameters}"
-            )
-            
-            self._show_accuracy_message("XGBoost Model Performance", metrics, additional_info)
-            
-            # Show feature importance if available
-            if self.model_results.feature_importance is not None:
-                importance_plot = self.plot_generator.create_feature_importance_plot(
-                    self.model_results.feature_importance,
-                    "Feature Importance"
-                )
-                self.plot_generator.show_plot(importance_plot, "Feature Importance")
-            
-            self._stop_progress()
-            self._update_status("Pressure prediction completed")
-            
-        except Exception as e:
-            self._stop_progress()
-            messagebox.showerror("Error", f"Failed to predict pressures: {str(e)}")
-            logger.error(f"Pressure prediction error: {str(e)}")
-    
-    def train_xgboost_model(self):
-        """Train XGBoost model with Point After Valve features and Critical Point target"""
-        if not self.water_network_data:
-            messagebox.showerror("Error", "No data loaded")
-            return
-        
-        # Create input window
-        input_window = tk.Toplevel(self.root)
-        input_window.title("Train XGBoost Model")
-        input_window.geometry("500x700")
-        input_window.configure(bg="#f0f0f0")
-        
-        ttk.Label(
-            input_window, 
-            text="Train XGBoost Model", 
-            font=self.title_font
-        ).pack(pady=10)
-        
-        # Point After Valve inputs
-        ttk.Label(
-            input_window, 
-            text="Enter values for Point After Valve:", 
-            font=self.custom_font
-        ).pack(pady=10)
-        
-        point_after_valve_inputs = {}
-        for col in self.water_network_data.point_after_valve_data.columns:
-            frame = ttk.Frame(input_window)
-            frame.pack(fill=tk.X, padx=10, pady=2)
-            
-            ttk.Label(
-                frame, 
-                text=f"{col} ({self.constants.MIN_PRESSURE}-{self.constants.MAX_PRESSURE}):", 
-                font=self.custom_font
-            ).pack(side=tk.LEFT)
-            
-            entry_var = tk.StringVar(
-                value=str(self.water_network_data.point_after_valve_data[col].mean())
-            )
-            ttk.Entry(
-                frame, 
-                textvariable=entry_var, 
-                font=self.custom_font
-            ).pack(side=tk.LEFT, fill=tk.X, expand=True)
-            
-            point_after_valve_inputs[col] = entry_var
-        
-        # Deby input
-        ttk.Label(
-            input_window, 
-            text="Enter Deby:", 
-            font=self.custom_font
-        ).pack(pady=10)
-        
-        deby_var = tk.StringVar(
-            value=str(self.water_network_data.deby_data['P-676'].mean())
-        )
-        ttk.Entry(
-            input_window, 
-            textvariable=deby_var, 
-            font=self.custom_font
-        ).pack(pady=5, padx=10, fill=tk.X)
-        
-        # Target selection
-        ttk.Label(
-            input_window, 
-            text="Select Target from Critical Point:", 
-            font=self.custom_font
-        ).pack(pady=10)
-        
-        target_var = tk.StringVar()
-        critical_point_cols = list(self.water_network_data.critical_point_data.columns)
-        target_dropdown = ttk.Combobox(
-            input_window, 
-            textvariable=target_var, 
-            values=critical_point_cols, 
-            font=self.custom_font
-        )
-        target_dropdown.set(critical_point_cols[0])
-        target_dropdown.pack(pady=5, padx=10)
-        
-        def train_model():
-            try:
-                # Validate inputs
-                point_after_valve_values = {}
-                for col, var in point_after_valve_inputs.items():
-                    value = var.get()
-                    try:
-                        value = float(value)
-                        if not self.constants.MIN_PRESSURE <= value <= self.constants.MAX_PRESSURE:
-                            messagebox.showerror(
-                                "Error", 
-                                f"Value for {col} must be between {self.constants.MIN_PRESSURE} and {self.constants.MAX_PRESSURE}"
-                            )
-                            return
-                        point_after_valve_values[col] = value
-                    except ValueError:
-                        messagebox.showerror("Error", f"Value for {col} must be numeric")
-                        return
-                
-                try:
-                    deby_value = float(deby_var.get())
-                except ValueError:
-                    messagebox.showerror("Error", "Deby value must be numeric")
-                    return
-                
-                selected_target = target_var.get()
-                if not selected_target or selected_target not in critical_point_cols:
-                    messagebox.showerror("Error", "Select a valid target column")
-                    return
-                
-                input_window.destroy()
-                self._run_xgb_training(
-                    list(point_after_valve_values.keys()), 
-                    selected_target, 
-                    point_after_valve_values, 
-                    deby_value
-                )
-                
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to train model: {str(e)}")
-                logger.error(f"Train model error: {str(e)}")
-        
-        ttk.Button(
-            input_window, 
-            text="Train Model", 
-            command=train_model
-        ).pack(pady=15)
-    
-    def _run_xgb_training(self, selected_features: List[str], selected_target: str, 
-                         point_after_valve_values: Dict[str, float], deby_value: float):
-        """Run XGBoost training with specified parameters"""
-        try:
-            self._start_progress("Training XGBoost model...")
-            
-            # Prepare data
-            point_after_valve_data = self.water_network_data.point_after_valve_data[selected_features].copy()
-            deby_data = self.water_network_data.deby_data.copy()
-            critical_point_data = self.water_network_data.critical_point_data.copy()
-            
-            # Reset index and merge data
-            point_after_valve_data = point_after_valve_data.reset_index().rename(columns={'index': 'id'})
-            deby_data = deby_data.reset_index().rename(columns={'index': 'id'})
-            critical_point_data = critical_point_data.reset_index().rename(columns={'index': 'id'})
-            
-            merged_data = pd.merge(point_after_valve_data, deby_data, on='id', how='inner')
-            merged_data = pd.merge(merged_data, critical_point_data, on='id', how='inner')
-            
-            if merged_data.empty:
-                raise ValueError("No overlapping data found after merging")
-            
-            features = selected_features + ['P-676']
-            targets = list(self.water_network_data.critical_point_data.columns)
-            
-            X = merged_data[features].to_numpy(dtype=float)
-            y = merged_data[targets].to_numpy(dtype=float)
-            
-            if X.shape[0] < 10 or y.shape[0] < 10:
-                raise ValueError("Insufficient data for training (minimum 10 samples required)")
-            
-            # Train model
-            self.model_results = self.model_trainer.train(X, y)
-            
-            # Make predictions
-            input_data = [point_after_valve_values[col] for col in selected_features] + [deby_value]
-            predictions = self.model_trainer.predict(np.array([input_data]))[0]
-            
-            self.model_results.predictions = {
-                target: pred for target, pred in zip(targets, predictions)
-            }
-            
-            # Display predictions
-            self._display_predictions(
-                self.model_results.predictions, 
-                "Predicted Critical Point Values"
-            )
-            
-            self._stop_progress()
             messagebox.showinfo(
-                "Success", 
-                f"XGBoost training completed in {self.model_results.training_time:.2f} seconds"
+                "Training Complete",
+                f"Hold-out R²: {result.metrics['R2']:.4f}\n"
+                f"Hold-out RMSE: {result.metrics['RMSE']:.4f}\n"
+                f"MAE: {result.metrics['MAE']:.4f}\n"
+                f"Training time: {result.training_seconds:.2f} s",
             )
-            self._update_status("XGBoost model training completed")
-            
-        except Exception as e:
-            self._stop_progress()
-            messagebox.showerror("Error", f"Failed to train XGBoost: {str(e)}")
-            logger.error(f"Error in run_xgb_training: {str(e)}")
-    
-    def _display_predictions(self, predictions: Dict[str, float], title: str):
-        """Display predictions in a new window"""
-        prediction_window = tk.Toplevel(self.root)
-        prediction_window.title(title)
-        prediction_window.geometry("500x400")
-        prediction_window.configure(bg="#f0f0f0")
-        
-        ttk.Label(
-            prediction_window, 
-            text=title, 
-            font=self.title_font
-        ).pack(pady=10)
-        
-        # Create treeview
-        tree_frame = ttk.Frame(prediction_window)
-        tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        columns = ["Critical Point", "Predicted Value"]
-        tree = ttk.Treeview(tree_frame, columns=columns, show='headings')
-        
-        for col in columns:
-            tree.heading(col, text=col)
-            tree.column(col, width=200, anchor='center')
-        
-        y_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
-        y_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        tree.configure(yscrollcommand=y_scroll.set)
-        tree.pack(fill=tk.BOTH, expand=True)
-        
-        # Insert data
-        for target, pred in predictions.items():
-            tree.insert("", "end", values=[target, f"{pred:.2f}"])
-        
-        # Save button
-        def save_predictions():
-            file_path = filedialog.asksaveasfilename(
-                title="Save Predictions",
-                defaultextension=".csv",
-                filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
-            )
-            
-            if file_path:
-                try:
-                    prediction_df = pd.DataFrame([
-                        {"Critical Point": target, "Predicted Value": pred}
-                        for target, pred in predictions.items()
-                    ])
-                    self.file_handler.save_csv(prediction_df, file_path)
-                    messagebox.showinfo("Success", f"Predictions saved to {file_path}")
-                except Exception as e:
-                    messagebox.showerror("Error", f"Failed to save predictions: {str(e)}")
-        
-        ttk.Button(
-            prediction_window, 
-            text="Save Predictions to CSV", 
-            command=save_predictions
-        ).pack(pady=10)
-    
-    def optimize_with_pso(self):
-        """Optimize PRV settings using PSO and show accuracy"""
-        if not self.water_network_data:
-            messagebox.showerror("Error", "No data loaded")
+
+        self._run_task("Training leakage-safe critical-point XGBoost model...", task, done)
+
+    def _refresh_model_view(self) -> None:
+        for item in self.metrics_tree.get_children():
+            self.metrics_tree.delete(item)
+        self.model_text.configure(state=tk.NORMAL)
+        self.model_text.delete("1.0", tk.END)
+
+        result = self.critical_model.result
+        if result is None:
+            self.model_text.insert(tk.END, "No critical-point model trained yet.")
+            self.model_text.configure(state=tk.DISABLED)
             return
-        
-        try:
-            self._start_progress("Optimizing with PSO...")
-            
-            # Prepare data
-            prv_data = self.water_network_data.prv_data.copy()
-            point_after_valve_data = self.water_network_data.point_after_valve_data.copy()
-            critical_point_data = self.water_network_data.critical_point_data.copy()
-            
-            prv_data = prv_data.apply(pd.to_numeric, errors='coerce').fillna(prv_data.mean())
-            point_after_valve_data = point_after_valve_data.apply(pd.to_numeric, errors='coerce').fillna(point_after_valve_data.mean())
-            critical_point_data = critical_point_data.apply(pd.to_numeric, errors='coerce').fillna(critical_point_data.mean())
-            
-            if len(point_after_valve_data) < self.constants.NUM_HOURS:
-                raise ValueError(
-                    f"Data must contain at least {self.constants.NUM_HOURS} hours"
-                )
-            
-            # Initialize results storage
-            optimal_prv_settings = []
-            optimal_pressures = []
-            demands_list = []
-            penalties = []
-            
-            # Run PSO for each hour
-            for hour in range(self.constants.NUM_HOURS):
-                demands = point_after_valve_data.iloc[hour].values
-                prev_settings = optimal_prv_settings[-1] if hour > 0 else None
-                
-                results = self.optimizer.optimize(demands, prev_settings)
-                optimal_prv_settings.append(results.optimal_prv_settings[0])
-                optimal_pressures.append(results.optimal_pressures[0])
-                demands_list.append(demands)
-                penalties.append(results.score)
-            
-            # Predict critical point pressures using XGBoost
-            critical_point_predictions = self._predict_critical_points(
-                optimal_pressures, 
-                point_after_valve_data, 
-                critical_point_data
-            )
-            
-            # Store results
-            self.pso_results = PSOResults(
-                optimal_prv_settings=optimal_prv_settings,
-                optimal_pressures=optimal_pressures,
-                demands=demands_list,
-                critical_point_predictions=critical_point_predictions,
-                score=np.mean(penalties),
-                convergence_history=results.convergence_history,
-                optimization_time=results.optimization_time,
-                final_parameters=results.final_parameters
-            )
-            
-            # Calculate optimization metrics
-            avg_pressure = np.mean([np.mean(p) for p in optimal_pressures])
-            pressure_std = np.mean([np.std(p) for p in optimal_pressures])
-            avg_penalty = np.mean(penalties)
-            
-            # Display results
-            self._display_pso_results()
-            
-            # Show accuracy metrics
-            metrics = {
-                'penalty': avg_penalty,
-                'avg_pressure': avg_pressure,
-                'pressure_std': pressure_std,
-                'optimization_time': self.pso_results.optimization_time,
-                'convergence_rate': self.pso_results.final_parameters['convergence_rate']
-            }
-            
-            additional_info = (
-                f"Optimization Hours: {self.constants.NUM_HOURS}\n"
-                f"Number of PRVs: {len(optimal_prv_settings[0])}\n"
-                f"Pressure Range: {self.constants.MIN_PRESSURE} - {self.constants.MAX_PRESSURE} meters\n"
-                f"PRV Settings Range: {np.min(optimal_prv_settings):.2f} - {np.max(optimal_prv_settings):.2f}\n"
-                f"PSO Parameters: {self.pso_results.final_parameters}"
-            )
-            
-            self._show_accuracy_message("PSO Optimization Performance", metrics, additional_info)
-            
-            # Show convergence plot
-            convergence_plot = self.plot_generator.create_convergence_plot(
-                self.pso_results.convergence_history,
-                "PSO Convergence History"
-            )
-            self.plot_generator.show_plot(convergence_plot, "PSO Convergence")
-            
-            self._stop_progress()
-            messagebox.showinfo("Success", "PSO optimization completed")
-            self._update_status("PSO optimization completed")
-            
-        except Exception as e:
-            self._stop_progress()
-            messagebox.showerror("Error", f"Failed to optimize with PSO: {str(e)}")
-            logger.error(f"PSO optimization error: {str(e)}")
-    
-    def _predict_critical_points(self, optimal_pressures: List[np.ndarray], 
-                               point_after_valve_data: pd.DataFrame, 
-                               critical_point_data: pd.DataFrame) -> np.ndarray:
-        """Predict critical point pressures using XGBoost"""
-        deby_data = self.water_network_data.deby_data.copy()
-        deby_data = deby_data.apply(pd.to_numeric, errors='coerce').fillna(deby_data.mean())
-        deby_values = deby_data['P-676'].values[:self.constants.NUM_HOURS]
-        
-        features = list(point_after_valve_data.columns) + ['P-676']
-        targets = list(critical_point_data.columns)
-        
-        data = pd.concat([
-            point_after_valve_data, 
-            deby_data, 
-            critical_point_data
-        ], axis=1, join='inner')
-        
-        if data.empty:
-            raise ValueError("No overlapping data found")
-        
-        X = data[features].to_numpy(dtype=float)
-        y = data[targets].to_numpy(dtype=float)
-        
-        if X.shape[0] < 10 or y.shape[0] < 10:
-            raise ValueError("Insufficient data for training")
-        
-        # Train model
-        model_results = self.model_trainer.train(X, y)
-        
-        # Prepare input data for prediction
-        input_data = []
-        for hour in range(self.constants.NUM_HOURS):
-            pressures = optimal_pressures[hour]
-            deby = deby_values[hour]
-            input_data.append(list(pressures) + [deby])
-        
-        input_data = np.array(input_data)
-        return model_results.model.predict(input_data)
-    
-    def _display_pso_results(self):
-        """Display PSO optimization results"""
-        result_window = tk.Toplevel(self.root)
-        result_window.title("PSO Optimization Results")
-        result_window.geometry("1000x700")
-        result_window.configure(bg="#f0f0f0")
-        
-        ttk.Label(
-            result_window, 
-            text=f"PSO Optimization Results ({self.constants.NUM_HOURS} Hours)", 
-            font=self.title_font
-        ).pack(pady=10)
-        
-        # Create notebook for tabs
-        notebook = ttk.Notebook(result_window)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        # Tab 1: Results table
-        table_tab = ttk.Frame(notebook)
-        notebook.add(table_tab, text="Results Table")
-        
-        # Create treeview for results
-        tree_frame = ttk.Frame(table_tab)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-        
-        columns = ["Hour"] + \
-                  [f"PRV_{i+1}" for i in range(len(self.pso_results.optimal_prv_settings[0]))] + \
-                  [f"Pressure_{i+1}" for i in range(len(self.pso_results.optimal_pressures[0]))] + \
-                  [f"Demand_{i+1}" for i in range(len(self.pso_results.demands[0]))] + \
-                  [f"Critical_{col}" for col in self.water_network_data.critical_point_data.columns]
-        
-        tree = ttk.Treeview(tree_frame, columns=columns, show='headings')
-        
-        for col in columns:
-            tree.heading(col, text=col)
-            tree.column(col, width=80, anchor='center')
-        
-        y_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
-        y_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        tree.configure(yscrollcommand=y_scroll.set)
-        tree.pack(fill=tk.BOTH, expand=True)
-        
-        # Insert data
-        for hour in range(self.constants.NUM_HOURS):
-            values = [hour + 1] + \
-                     [f"{x:.2f}" for x in self.pso_results.optimal_prv_settings[hour]] + \
-                     [f"{x:.2f}" for x in self.pso_results.optimal_pressures[hour]] + \
-                     [f"{x:.2f}" for x in self.pso_results.demands[hour]] + \
-                     [f"{self.pso_results.critical_point_predictions[hour][i]:.2f}" 
-                      for i in range(len(self.water_network_data.critical_point_data.columns))]
-            
-            tree.insert("", "end", values=values)
-        
-        # Tab 2: Plots
-        plots_tab = ttk.Frame(notebook)
-        notebook.add(plots_tab, text="Plots")
-        
-        # Create plots
-        self._create_pso_plots(plots_tab)
-        
-        # Save results button
-        def save_results():
-            file_path = filedialog.asksaveasfilename(
-                title="Save PSO Results",
-                defaultextension=".inp",
-                filetypes=[("INP Files", "*.inp"), ("All Files", "*.*")]
-            )
-            
-            if not file_path:
-                return
-            
-            try:
-                self.inp_generator.generate_inp_file(
-                    self.pso_results,
-                    file_path,
-                    list(self.water_network_data.critical_point_data.columns),
-                    [col.split('-B')[0] for col in self.water_network_data.point_after_valve_data.columns if '-B' in col]
-                )
-                messagebox.showinfo("Success", f"PSO results saved to {file_path}")
-                
-                # Prompt user to run simulation
-                if messagebox.askyesno("Run Simulation", "Do you want to run simulation?"):
-                    self.run_simulation(file_path)
-                    
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to save PSO results: {str(e)}")
-        
-        ttk.Button(
-            result_window, 
-            text="Save Results to INP", 
-            command=save_results
-        ).pack(pady=10)
-    
-    def _create_pso_plots(self, parent: tk.Widget):
-        """Create and save PSO optimization plots"""
-        # Pressure plot
-        pressure_data = {
-            f"Point_{i+1}": [self.pso_results.optimal_pressures[hour][i] 
-                             for hour in range(self.constants.NUM_HOURS)]
-            for i in range(len(self.pso_results.optimal_pressures[0]))
-        }
-        
-        pressure_plot = self.plot_generator.create_line_plot(
-            pressure_data,
-            "Optimized Pressures at Point After Valve",
-            "Hour",
-            "Pressure (meters)"
-        )
-        self.plot_generator.show_plot(pressure_plot, "Optimized Pressures")
-        
-        # Demand plot
-        demand_data = {
-            f"Demand_{i+1}": [self.pso_results.demands[hour][i] 
-                             for hour in range(self.constants.NUM_HOURS)]
-            for i in range(len(self.pso_results.demands[0]))
-        }
-        
-        demand_plot = self.plot_generator.create_line_plot(
-            demand_data,
-            "Demands at Point After Valve",
-            "Hour",
-            "Demand"
-        )
-        self.plot_generator.show_plot(demand_plot, "Demands")
-        
-        # Critical point pressures plot
-        critical_data = {
-            f"Critical_{col}": [self.pso_results.critical_point_predictions[hour][i] 
-                               for hour in range(self.constants.NUM_HOURS)]
-            for i, col in enumerate(self.water_network_data.critical_point_data.columns)
-        }
-        
-        critical_plot = self.plot_generator.create_line_plot(
-            critical_data,
-            "Predicted Critical Point Pressures",
-            "Hour",
-            "Pressure (meters)"
-        )
-        self.plot_generator.show_plot(critical_plot, "Critical Point Pressures")
-        
-        # Create heatmap
-        heatmap_fig = self.plot_generator.create_pressure_heatmap(
-            np.array(self.pso_results.critical_point_predictions).T,
-            list(self.water_network_data.critical_point_data.columns),
-            "Critical Point Pressures Heatmap"
-        )
-        self.plot_generator.show_plot(heatmap_fig, "Pressure Heatmap")
-        
-        # Display plot buttons in GUI
-        ttk.Label(
-            parent, 
-            text="Generated Plots:", 
-            font=self.custom_font
-        ).pack(pady=10)
-        
-        plot_buttons = [
-            ("Pressure Plot", lambda: self.plot_generator.show_plot(pressure_plot, "Optimized Pressures")),
-            ("Demand Plot", lambda: self.plot_generator.show_plot(demand_plot, "Demands")),
-            ("Critical Point Plot", lambda: self.plot_generator.show_plot(critical_plot, "Critical Point Pressures")),
-            ("Heatmap", lambda: self.plot_generator.show_plot(heatmap_fig, "Pressure Heatmap"))
+
+        for name, value in result.metrics.items():
+            shown = "nan" if not np.isfinite(value) else f"{value:.6f}"
+            self.metrics_tree.insert("", "end", values=(name, shown))
+        self.metrics_tree.insert("", "end", values=("Training seconds", f"{result.training_seconds:.2f}"))
+        if result.best_cv_score is not None:
+            self.metrics_tree.insert("", "end", values=("Best CV neg-RMSE", f"{result.best_cv_score:.6f}"))
+
+        lines = [
+            f"Features: {result.feature_names}",
+            f"Targets: {result.target_names}",
+            "",
+            "Per-target metrics:",
+            result.per_target_metrics.to_string(index=False),
+            "",
+            "Best hyperparameters:",
+            json.dumps(result.best_params, indent=2, default=str) if result.best_params else "Tuning skipped (small dataset).",
+            "",
+            "Leakage controls:",
+            "- Train/test split occurs before pipeline fitting.",
+            "- KNNImputer is fitted inside the sklearn Pipeline.",
+            "- IQRClipper is fitted inside each CV fold.",
+            "- Targets are never imputed.",
+            "- No StandardScaler is used because XGBoost does not require feature scaling.",
         ]
-        
-        for text, command in plot_buttons:
-            ttk.Button(
-                parent, 
-                text=text, 
-                command=command
-            ).pack(side=tk.LEFT, padx=5, pady=5)
-    
-    def _parse_hours(self, hours_str: str) -> List[int]:
-        """Parse hours string like '1,3,5-7' into list of integers"""
-        hours = []
-        parts = hours_str.split(',')
-        for part in parts:
-            part = part.strip()
-            if '-' in part:
-                start, end = map(int, part.split('-'))
-                if start > end or start < 1 or end > self.constants.NUM_HOURS:
-                    raise ValueError(f"Invalid hour range: {part}")
-                hours.extend(range(start, end + 1))
-            else:
-                h = int(part)
-                if h < 1 or h > self.constants.NUM_HOURS:
-                    raise ValueError(f"Invalid hour: {h}")
-                hours.append(h)
-        return sorted(set(hours))
-    
-    def run_simulation(self, inp_file: Optional[str] = None):
-        """Run hydraulic simulation"""
-        if not self.pso_results and not inp_file:
-            messagebox.showerror("Error", "No PSO results or INP file provided")
+        self.model_text.insert(tk.END, "\n".join(lines))
+        self.model_text.configure(state=tk.DISABLED)
+
+    def predict_critical_points_dialog(self) -> None:
+        result = self.critical_model.result
+        if result is None:
+            messagebox.showerror("Error", "Train or load the critical-point model first.")
             return
-        
-        if not inp_file:
-            file_path = filedialog.askopenfilename(
-                title="Select INP File",
-                filetypes=[("INP Files", "*.inp"), ("All Files", "*.*")]
-            )
-            
-            if not file_path:
-                return
-        else:
-            file_path = inp_file
-        
-        # Prompt user for hours
-        hours_str = simpledialog.askstring(
-            "Select Hours", 
-            "Enter hours (comma separated, e.g., 1,3,5-7) or leave blank for all:"
-        )
-        
-        hours = None
-        if hours_str and hours_str.strip():
+        if self.data is None:
+            messagebox.showerror("Error", "Load a dataset first.")
+            return
+
+        window = tk.Toplevel(self.root)
+        window.title("Predict Critical Points")
+        window.geometry("560x650")
+
+        outer = ttk.Frame(window, padding=12)
+        outer.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(outer, text="Enter feature values", style="Section.TLabel").pack(anchor="w")
+
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        scroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        form = ttk.Frame(canvas)
+        form.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=form, anchor="nw")
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, pady=8)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        entries: Dict[str, tk.StringVar] = {}
+        for feature in result.feature_names:
+            row = ttk.Frame(form)
+            row.pack(fill=tk.X, pady=3)
+            ttk.Label(row, text=feature, width=28).pack(side=tk.LEFT)
+            numeric = pd.to_numeric(self.data.raw[feature], errors="coerce") if feature in self.data.raw else pd.Series(dtype=float)
+            default = float(numeric.median()) if numeric.notna().any() else 0.0
+            var = tk.StringVar(value=f"{default:.6g}")
+            ttk.Entry(row, textvariable=var, width=22).pack(side=tk.LEFT)
+            entries[feature] = var
+
+        def do_predict() -> None:
             try:
-                hours = self._parse_hours(hours_str)
-            except ValueError as e:
-                messagebox.showerror("Error", str(e))
-                return
-        
-        try:
-            self._start_progress("Running simulation...")
-            
-            # Run simulation
-            simulated_pressures = self.simulator.run_simulation(
-                file_path,
-                list(self.water_network_data.critical_point_data.columns),
-                hours=hours
-            )
-            
-            # Compare results if PSO results available
-            self._compare_simulation_results(simulated_pressures, hours)
-            
-            self._stop_progress()
-            self._update_status("Simulation completed")
-            
-        except Exception as e:
-            self._stop_progress()
-            error_msg = f"Failed to run simulation: {str(e)}"
-            logger.error(f"Simulation error: {str(e)}")
-            
-            error_detail = f"""
-Simulation Failed
-Error: {str(e)}
-Possible solutions:
-1. Verify the INP file format
-2. Ensure all node IDs exist in the network
-3. Check hydraulic parameters (pressures, demands)
-Technical Details:
-- File: {file_path}
-- Critical Points: {list(self.water_network_data.critical_point_data.columns)}
-- Error Type: {type(e).__name__}
-"""
-            
-            messagebox.showerror("Simulation Error", error_detail)
-    
-    def _compare_simulation_results(self, simulated_pressures: np.ndarray, hours: Optional[List[int]] = None):
-        """Compare simulation results with predictions and show accuracy"""
-        if hours is None:
-            hours = list(range(1, self.constants.NUM_HOURS + 1))
-        
-        if self.pso_results:
-            predicted_pressures = self.pso_results.critical_point_predictions[[h - 1 for h in hours]]
-        else:
-            predicted_pressures = None  # No comparison if no PSO results
-        
-        comparison_window = tk.Toplevel(self.root)
-        comparison_window.title("Simulation vs Predictions")
-        comparison_window.geometry("1000x700")
-        comparison_window.configure(bg="#f0f0f0")
-        
-        ttk.Label(
-            comparison_window, 
-            text="Simulation vs Predicted Pressures", 
-            font=self.title_font
-        ).pack(pady=10)
-        
-        # Create notebook for tabs
-        notebook = ttk.Notebook(comparison_window)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        # Tab 1: Comparison table
-        table_tab = ttk.Frame(notebook)
-        notebook.add(table_tab, text="Comparison Table")
-        
-        # Create treeview for comparison
-        tree_frame = ttk.Frame(table_tab)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-        
-        columns = ["Hour"] + \
-                  [f"{node}_Sim" for node in self.water_network_data.critical_point_data.columns]
-        
-        if predicted_pressures is not None:
-            columns += [f"{node}_Pred" for node in self.water_network_data.critical_point_data.columns] + \
-                       [f"{node}_Diff" for node in self.water_network_data.critical_point_data.columns]
-        
-        tree = ttk.Treeview(tree_frame, columns=columns, show='headings')
-        
-        for col in columns:
-            tree.heading(col, text=col)
-            tree.column(col, width=80, anchor='center')
-        
-        y_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
-        y_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        tree.configure(yscrollcommand=y_scroll.set)
-        tree.pack(fill=tk.BOTH, expand=True)
-        
-        # Insert comparison data and calculate accuracy
-        total_mae = 0
-        total_rmse = 0
-        total_mape = 0
-        count = 0
-        
-        for i, hour in enumerate(hours):
-            values = [hour]
-            
-            for j, node in enumerate(self.water_network_data.critical_point_data.columns):
-                sim = simulated_pressures[i][j]
-                values.append(f"{sim:.2f}")
-                
-                if predicted_pressures is not None:
-                    pred = predicted_pressures[i][j]
-                    diff = sim - pred
-                    values.extend([f"{pred:.2f}", f"{diff:.2f}"])
-                    
-                    # Calculate accuracy metrics
-                    if sim != 0:  # Avoid division by zero
-                        total_mae += abs(diff)
-                        total_rmse += diff ** 2
-                        total_mape += abs(diff / sim) * 100
-                        count += 1
-            
-            tree.insert("", "end", values=values)
-        
-        # Calculate average accuracy metrics if comparison available
-        if predicted_pressures is not None:
-            avg_mae = total_mae / count if count > 0 else 0
-            avg_rmse = np.sqrt(total_rmse / count) if count > 0 else 0
-            avg_mape = total_mape / count if count > 0 else 0
-        
-        # Tab 2: Comparison plot (if comparison available)
-        if predicted_pressures is not None:
-            plot_tab = ttk.Frame(notebook)
-            notebook.add(plot_tab, text="Comparison Plot")
-            
-            # Create comparison plot
-            comparison_fig = self.plot_generator.create_comparison_plot(
-                simulated_pressures,
-                predicted_pressures,
-                list(self.water_network_data.critical_point_data.columns),
-                "Simulation vs Predicted Pressures"
-            )
-            
-            # Add plot to window
-            canvas = FigureCanvasTkAgg(comparison_fig, master=plot_tab)
-            canvas.draw()
-            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-            
-            # Show accuracy metrics
-            metrics = {
-                'mae': avg_mae,
-                'rmse': avg_rmse,
-                'mape': avg_mape
-            }
-            
-            additional_info = (
-                f"Comparison Hours: {len(hours)}\n"
-                f"Critical Points: {len(self.water_network_data.critical_point_data.columns)}\n"
-                f"Simulated Pressure Range: {simulated_pressures.min():.2f} - {simulated_pressures.max():.2f}\n"
-                f"Predicted Pressure Range: {predicted_pressures.min():.2f} - {predicted_pressures.max():.2f}"
-            )
-            
-            self._show_accuracy_message("Simulation vs Prediction Accuracy", metrics, additional_info)
-        
-        # Add save button
-        def save_results():
-            file_path = filedialog.asksaveasfilename(
-                title="Save Comparison Results",
-                defaultextension=".csv",
-                filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
-            )
-            
-            if file_path:
-                try:
-                    # Create DataFrame for saving
-                    data = []
-                    for i, h in enumerate(hours):
-                        row = {'Hour': h}
-                        for j, node in enumerate(self.water_network_data.critical_point_data.columns):
-                            row[f"{node}_Sim"] = simulated_pressures[i][j]
-                            if predicted_pressures is not None:
-                                row[f"{node}_Pred"] = predicted_pressures[i][j]
-                                row[f"{node}_Diff"] = simulated_pressures[i][j] - predicted_pressures[i][j]
-                        data.append(row)
-                    
-                    df = pd.DataFrame(data)
-                    self.file_handler.save_csv(df, file_path)
-                    messagebox.showinfo("Success", f"Comparison results saved to {file_path}")
-                except Exception as e:
-                    messagebox.showerror("Error", f"Failed to save results: {str(e)}")
-        
-        ttk.Button(
-            comparison_window, 
-            text="Save Results", 
-            command=save_results
-        ).pack(pady=10)
-    
-    def predict_critical_points(self):
-        """Predict Critical Point pressures using PSO outputs and Deby"""
-        if not self.pso_results:
-            messagebox.showerror("Error", "Run PSO optimization first")
+                frame = pd.DataFrame([{name: float(var.get()) for name, var in entries.items()}])
+                pred = self.critical_model.predict_frame(frame).iloc[0]
+                text = "\n".join(f"{name}: {value:.4f}" for name, value in pred.items())
+                messagebox.showinfo("Critical-Point Prediction", text, parent=window)
+            except Exception as exc:
+                messagebox.showerror("Prediction Error", str(exc), parent=window)
+
+        ttk.Button(window, text="Predict", command=do_predict).pack(pady=(0, 12))
+
+    def show_model_evaluation(self) -> None:
+        result = self.critical_model.result
+        if result is None or result.y_test.size == 0:
+            messagebox.showerror("Error", "Train the critical-point model first.")
             return
-        
-        if not self.model_results or not self.model_results.model:
-            messagebox.showerror("Error", "Train XGBoost model first")
+        self._show_figure(PlotFactory.actual_vs_predicted(result), "Model Evaluation")
+
+    def show_feature_importance(self) -> None:
+        result = self.critical_model.result
+        if result is None:
+            messagebox.showerror("Error", "Train the critical-point model first.")
             return
-        
-        try:
-            # Create input window for Deby values
-            deby_window = tk.Toplevel(self.root)
-            deby_window.title("Input Deby Values")
-            deby_window.geometry("400x600")
-            deby_window.configure(bg="#f0f0f0")
-            
-            ttk.Label(
-                deby_window, 
-                text="Enter Deby values for each hour:", 
-                font=self.custom_font
-            ).pack(pady=10)
-            
-            deby_inputs = []
-            for hour in range(self.constants.NUM_HOURS):
-                frame = ttk.Frame(deby_window)
-                frame.pack(fill=tk.X, padx=10, pady=2)
-                
-                ttk.Label(
-                    frame, 
-                    text=f"Hour {hour+1}:", 
-                    font=self.custom_font
-                ).pack(side=tk.LEFT)
-                
-                default_value = str(self.water_network_data.deby_data['P-676'].iloc[hour % len(self.water_network_data.deby_data)])
-                
-                entry_var = tk.StringVar(value=default_value)
-                ttk.Entry(
-                    frame, 
-                    textvariable=entry_var, 
-                    font=self.custom_font
-                ).pack(side=tk.LEFT, fill=tk.X, expand=True)
-                
-                deby_inputs.append(entry_var)
-            
-            def predict():
-                try:
-                    deby_values = [float(var.get()) for var in deby_inputs]
-                    
-                    # Get the features used during training
-                    point_after_valve_cols = list(self.water_network_data.point_after_valve_data.columns)
-                    
-                    # Prepare input data for prediction
-                    input_data = []
-                    for hour in range(self.constants.NUM_HOURS):
-                        # Use optimal pressures from PSO as Point After Valve values
-                        pressures = self.pso_results.optimal_pressures[hour]
-                        deby = deby_values[hour]
-                        
-                        # Ensure the number of pressures matches the number of Point After Valve columns
-                        if len(pressures) != len(point_after_valve_cols):
-                            raise ValueError(
-                                f"Number of pressures ({len(pressures)}) does not match "
-                                f"number of Point After Valve columns ({len(point_after_valve_cols)})"
-                            )
-                        
-                        # Combine pressures and Deby value
-                        input_data.append(list(pressures) + [deby])
-                    
-                    input_data = np.array(input_data)
-                    
-                    # Log input shape for debugging
-                    logger.info(f"Prediction input shape: {input_data.shape}")
-                    
-                    # Make predictions using the trained model
-                    predictions = self.model_trainer.predict(input_data)
-                    
-                    # Create a dictionary to store predictions for each critical point
-                    prediction_dict = {}
-                    for i, col in enumerate(self.water_network_data.critical_point_data.columns):
-                        prediction_dict[col] = [predictions[hour][i] for hour in range(self.constants.NUM_HOURS)]
-                    
-                    deby_window.destroy()
-                    
-                    # Display predictions in a table and plot
-                    self._display_critical_point_predictions(prediction_dict, "Critical Point Predictions")
-                    
-                except ValueError as e:
-                    messagebox.showerror("Error", f"Invalid input: {str(e)}")
-                except Exception as e:
-                    messagebox.showerror("Error", f"Failed to predict critical points: {str(e)}")
-                    logger.error(f"Critical point prediction error: {str(e)}")
-            
-            ttk.Button(
-                deby_window, 
-                text="Predict", 
-                command=predict
-            ).pack(pady=15)
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to create prediction window: {str(e)}")
-            logger.error(f"Critical point prediction window error: {str(e)}")
-    
-    def _display_critical_point_predictions(self, predictions: Dict[str, List[float]], title: str):
-        """Display critical point predictions in a new window with table and plot"""
-        prediction_window = tk.Toplevel(self.root)
-        prediction_window.title(title)
-        prediction_window.geometry("1000x700")
-        prediction_window.configure(bg="#f0f0f0")
-        
-        ttk.Label(
-            prediction_window, 
-            text=title, 
-            font=self.title_font
-        ).pack(pady=10)
-        
-        # Create notebook for tabs
-        notebook = ttk.Notebook(prediction_window)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        # Tab 1: Table view
-        table_tab = ttk.Frame(notebook)
-        notebook.add(table_tab, text="Table View")
-        
-        # Create treeview for predictions
-        tree_frame = ttk.Frame(table_tab)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Create columns: Hour + each critical point
-        columns = ["Hour"] + list(predictions.keys())
-        tree = ttk.Treeview(tree_frame, columns=columns, show='headings')
-        
-        # Configure columns
-        tree.column("Hour", width=50, anchor='center')
-        for col in predictions.keys():
-            tree.column(col, width=100, anchor='center')
-            tree.heading(col, text=col)
-        
-        y_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
-        y_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        tree.configure(yscrollcommand=y_scroll.set)
-        tree.pack(fill=tk.BOTH, expand=True)
-        
-        # Insert data
-        for hour in range(self.constants.NUM_HOURS):
-            values = [hour + 1]
-            for col in predictions.keys():
-                values.append(f"{predictions[col][hour]:.2f}")
-            tree.insert("", "end", values=values)
-        
-        # Tab 2: Plot view
-        plot_tab = ttk.Frame(notebook)
-        notebook.add(plot_tab, text="Plot View")
-        
-        # Create line plot
-        line_plot = self.plot_generator.create_line_plot(
-            predictions,
-            "Critical Point Pressure Predictions",
-            "Hour",
-            "Pressure (m)"
+        self._show_figure(PlotFactory.feature_importance(result), "Feature Importance")
+
+    def save_critical_model(self) -> None:
+        if self.critical_model.result is None:
+            messagebox.showerror("Error", "No trained critical model to save.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".joblib",
+            filetypes=[("Joblib model", "*.joblib")],
         )
-        
-        # Add plot to window
-        canvas = FigureCanvasTkAgg(line_plot, master=plot_tab)
+        if not path:
+            return
+        try:
+            self.critical_model.save(path)
+            self._set_status(f"Saved critical model: {Path(path).name}")
+        except Exception as exc:
+            messagebox.showerror("Save Model Error", str(exc))
+
+    def load_critical_model(self) -> None:
+        path = filedialog.askopenfilename(filetypes=[("Joblib model", "*.joblib"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            self.critical_model.load(path)
+            self._refresh_model_view()
+            self._set_status(f"Loaded critical model: {Path(path).name}")
+        except Exception as exc:
+            messagebox.showerror("Load Model Error", str(exc))
+
+    # --------------------------- PSO actions ---------------------------
+
+    def _derive_prv_bounds(self, data: WaterNetworkData) -> List[Tuple[float, float]]:
+        frame = self._numeric(data.raw, data.schema.prv_columns)
+        bounds: List[Tuple[float, float]] = []
+        for col in data.schema.prv_columns:
+            values = frame[col].dropna().to_numpy(dtype=float)
+            if values.size < 2:
+                bounds.append((self.config.min_prv, self.config.max_prv))
+                continue
+            low = float(np.quantile(values, 0.01))
+            high = float(np.quantile(values, 0.99))
+            spread = max(high - low, 1.0)
+            low = max(self.config.min_prv, low - 0.08 * spread)
+            high = min(self.config.max_prv, high + 0.08 * spread)
+            if high - low < 0.5:
+                midpoint = (high + low) / 2.0
+                low = max(self.config.min_prv, midpoint - 0.5)
+                high = min(self.config.max_prv, midpoint + 0.5)
+            bounds.append((low, high))
+        return bounds
+
+    def run_pso(self) -> None:
+        try:
+            data = self._require_data()
+            SchemaDetector.validate_for_pso(data.schema)
+        except Exception as exc:
+            messagebox.showerror("Cannot Optimize", str(exc))
+            return
+
+        # Ask how many rows/hours to optimize without demanding exactly 24.
+        max_hours = min(self.config.optimization_hours, len(data.raw))
+        hours = simpledialog.askinteger(
+            "Optimization Hours",
+            f"Number of sequential rows/hours to optimize (1-{max_hours}):",
+            initialvalue=max_hours,
+            minvalue=1,
+            maxvalue=max_hours,
+            parent=self.root,
+        )
+        if not hours:
+            return
+
+        def task() -> OptimizationResult:
+            schema = data.schema
+            demand_col = schema.demand_column
+            assert demand_col is not None
+
+            # Surrogate A: historical PRV + demand -> downstream/point-after-valve pressure.
+            down_features = schema.prv_columns + [demand_col]
+            self.downstream_model.train(
+                data.raw,
+                down_features,
+                schema.point_after_valve_columns,
+                tune=True,
+            )
+
+            # Surrogate B: downstream + demand -> critical pressure.
+            critical_features = schema.point_after_valve_columns + [demand_col]
+            self.critical_model.train(
+                data.raw,
+                critical_features,
+                schema.critical_point_columns,
+                tune=True,
+            )
+
+            bounds = self._derive_prv_bounds(data)
+            demand_series = pd.to_numeric(data.raw[demand_col], errors="coerce")
+            if demand_series.notna().sum() == 0:
+                raise ValueError(f"Demand column '{demand_col}' has no numeric values.")
+            demand_series = demand_series.interpolate(limit_direction="both").fillna(demand_series.median())
+
+            prv_history = self._numeric(data.raw, schema.prv_columns)
+            # For reference settings only; never used to fit test evaluation.
+            prv_history = prv_history.interpolate(limit_direction="both")
+            for col in prv_history.columns:
+                if prv_history[col].isna().all():
+                    prv_history[col] = (self.config.min_prv + self.config.max_prv) / 2.0
+                else:
+                    prv_history[col] = prv_history[col].fillna(prv_history[col].median())
+
+            def downstream_predict(settings_matrix: np.ndarray, demand: float) -> np.ndarray:
+                settings_matrix = np.atleast_2d(np.asarray(settings_matrix, dtype=float))
+                frame = pd.DataFrame(settings_matrix, columns=schema.prv_columns)
+                frame[demand_col] = float(demand)
+                return self.downstream_model.predict_frame(frame).to_numpy(dtype=float)
+
+            def critical_predict(downstream_matrix: np.ndarray, demand: float) -> np.ndarray:
+                downstream_matrix = np.atleast_2d(np.asarray(downstream_matrix, dtype=float))
+                frame = pd.DataFrame(downstream_matrix, columns=schema.point_after_valve_columns)
+                frame[demand_col] = float(demand)
+                return self.critical_model.predict_frame(frame).to_numpy(dtype=float)
+
+            hour_results: List[PSOHourResult] = []
+            previous: Optional[np.ndarray] = None
+            start = time.perf_counter()
+
+            for h in range(hours):
+                demand = float(demand_series.iloc[h])
+                reference = prv_history.iloc[h].to_numpy(dtype=float)
+                settings, downstream, score, convergence = self.pso.optimize_hour(
+                    demand=demand,
+                    prv_bounds=bounds,
+                    downstream_predictor=downstream_predict,
+                    critical_predictor=critical_predict,
+                    previous_settings=previous,
+                    reference_settings=reference,
+                )
+
+                critical_input = {
+                    name: float(value)
+                    for name, value in zip(schema.point_after_valve_columns, downstream)
+                }
+                critical_input[demand_col] = demand
+                critical_pred = self.critical_model.predict_frame(pd.DataFrame([critical_input]))
+                critical = critical_pred.iloc[0].to_numpy(dtype=float)
+
+                hour_results.append(
+                    PSOHourResult(
+                        hour=h + 1,
+                        demand=demand,
+                        prv_settings=settings,
+                        downstream_pressures=downstream,
+                        critical_pressures=critical,
+                        objective=float(score),
+                        convergence=list(convergence),
+                    )
+                )
+                previous = settings.copy()
+
+            return OptimizationResult(
+                hours=hour_results,
+                prv_names=schema.prv_columns,
+                downstream_names=schema.point_after_valve_columns,
+                critical_names=schema.critical_point_columns,
+                total_seconds=time.perf_counter() - start,
+            )
+
+        def done(result: OptimizationResult) -> None:
+            self.optimization_result = result
+            self._refresh_model_view()
+            self._refresh_optimization_view()
+            self.notebook.select(self.optimization_tab)
+            violations = sum(
+                int(np.sum((x.downstream_pressures < self.config.min_pressure) | (x.downstream_pressures > self.config.max_pressure)))
+                for x in result.hours
+            )
+            self._set_status(
+                f"PSO complete | {len(result.hours)} hours | downstream constraint violations={violations} | {result.total_seconds:.2f}s"
+            )
+            messagebox.showinfo(
+                "Optimization Complete",
+                f"Optimized hours: {len(result.hours)}\n"
+                f"PRVs: {len(result.prv_names)}\n"
+                f"Downstream constraint violations: {violations}\n"
+                f"Optimization time: {result.total_seconds:.2f} s\n\n"
+                "Method: data-driven surrogate PSO (not a hydraulic solver).",
+            )
+
+        self._run_task("Training surrogate models and running PSO...", task, done)
+
+    def _refresh_optimization_view(self) -> None:
+        for item in self.optim_tree.get_children():
+            self.optim_tree.delete(item)
+        if self.optimization_result is None:
+            return
+        for item in self.optimization_result.hours:
+            critical_min = (
+                float(np.min(item.critical_pressures))
+                if item.critical_pressures is not None and len(item.critical_pressures)
+                else float("nan")
+            )
+            self.optim_tree.insert(
+                "",
+                "end",
+                values=(
+                    item.hour,
+                    f"{item.demand:.4f}",
+                    f"{item.objective:.4f}",
+                    f"{np.min(item.downstream_pressures):.3f}",
+                    f"{np.mean(item.downstream_pressures):.3f}",
+                    f"{np.max(item.downstream_pressures):.3f}",
+                    f"{critical_min:.3f}",
+                ),
+            )
+
+    def export_optimization(self) -> None:
+        if self.optimization_result is None:
+            messagebox.showerror("Error", "Run PSO optimization first.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            title="Export Optimization Results",
+        )
+        if not path:
+            return
+        try:
+            CSVService.save(self.optimization_result.to_dataframe(), path)
+            self._set_status(f"Exported optimization results: {Path(path).name}")
+        except Exception as exc:
+            messagebox.showerror("Export Error", str(exc))
+
+    def show_optimization_plot(self) -> None:
+        if self.optimization_result is None:
+            messagebox.showerror("Error", "Run PSO optimization first.")
+            return
+        self._show_figure(
+            PlotFactory.pso_summary(self.optimization_result, self.config),
+            "PSO Optimization Summary",
+        )
+
+    def show_convergence_dialog(self) -> None:
+        if self.optimization_result is None:
+            messagebox.showerror("Error", "Run PSO optimization first.")
+            return
+        max_hour = len(self.optimization_result.hours)
+        hour = simpledialog.askinteger(
+            "PSO Convergence",
+            f"Hour to display (1-{max_hour}):",
+            minvalue=1,
+            maxvalue=max_hour,
+            initialvalue=1,
+            parent=self.root,
+        )
+        if not hour:
+            return
+        self._show_figure(
+            PlotFactory.pso_convergence(self.optimization_result.hours[hour - 1]),
+            f"PSO Convergence - Hour {hour}",
+        )
+
+    # --------------------------- analysis / hydraulics ---------------------------
+
+    def analyze_downstream(self) -> None:
+        if self.data is None or not self.data.schema.point_after_valve_columns:
+            messagebox.showerror("Error", "No Point After Valve columns detected.")
+            return
+        frame = self.data.point_after_valve_data
+        stats = frame.apply(pd.to_numeric, errors="coerce").describe().T
+
+        window = tk.Toplevel(self.root)
+        window.title("Point After Valve Analysis")
+        window.geometry("900x600")
+        text = tk.Text(window, font=("Consolas", 10), wrap=tk.NONE)
+        text.pack(fill=tk.BOTH, expand=True)
+        text.insert(tk.END, stats.to_string())
+        text.configure(state=tk.DISABLED)
+
+        ttk.Button(
+            window,
+            text="Show Boxplot",
+            command=lambda: self._show_figure(
+                PlotFactory.descriptive_boxplot(frame, "Point After Valve Distribution"),
+                "Downstream Distribution",
+            ),
+        ).pack(pady=8)
+
+    def run_wntr_dialog(self) -> None:
+        if not WNTRService.available():
+            messagebox.showinfo(
+                "WNTR Not Installed",
+                "Real hydraulic simulation requires WNTR.\n\nInstall it with:\n\npip install wntr",
+            )
+            return
+
+        path = filedialog.askopenfilename(
+            title="Select EPANET INP File",
+            filetypes=[("EPANET INP", "*.inp"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        nodes: Optional[List[str]] = None
+        if self.data is not None and self.data.schema.critical_point_columns:
+            nodes = self.data.schema.critical_point_columns
+
+        def task() -> pd.DataFrame:
+            return WNTRService.simulate_pressures(path, nodes)
+
+        def done(frame: pd.DataFrame) -> None:
+            self._set_status(f"WNTR simulation complete: {len(frame)} time steps x {len(frame.columns)} nodes")
+            self._show_wntr_results(frame)
+
+        self._run_task("Running real WNTR/EPANET hydraulic simulation...", task, done)
+
+    def _show_wntr_results(self, pressure: pd.DataFrame) -> None:
+        fig, ax = plt.subplots(figsize=(11, 6))
+        for col in pressure.columns[:12]:
+            ax.plot(pressure.index, pressure[col], label=col)
+        ax.set_xlabel("Hour")
+        ax.set_ylabel("Pressure")
+        ax.set_title("WNTR / EPANET Pressure Simulation")
+        ax.grid(alpha=0.25)
+        if len(pressure.columns) <= 12:
+            ax.legend(ncol=2)
+        fig.tight_layout()
+        self._show_figure(fig, "WNTR Simulation")
+
+    # --------------------------- figure window ---------------------------
+
+    def _show_figure(self, fig: plt.Figure, title: str) -> None:
+        window = tk.Toplevel(self.root)
+        window.title(title)
+        window.geometry("1050x720")
+
+        canvas = FigureCanvasTkAgg(fig, master=window)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        
-        # Save button
-        def save_predictions():
-            file_path = filedialog.asksaveasfilename(
-                title="Save Predictions",
-                defaultextension=".csv",
-                filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
-            )
-            
-            if file_path:
-                try:
-                    # Create DataFrame for saving
-                    data = {'Hour': list(range(1, self.constants.NUM_HOURS + 1))}
-                    for col, values in predictions.items():
-                        data[col] = values
-                    
-                    df = pd.DataFrame(data)
-                    self.file_handler.save_csv(df, file_path)
-                    messagebox.showinfo("Success", f"Predictions saved to {file_path}")
-                except Exception as e:
-                    messagebox.showerror("Error", f"Failed to save predictions: {str(e)}")
-        
-        ttk.Button(
-            prediction_window, 
-            text="Save Predictions to CSV", 
-            command=save_predictions
-        ).pack(pady=10)
-    
-    def show_about(self):
-        """Show about dialog"""
-        about_text = """Water Network Analyzer - Professional Edition v4.0
-        
-A comprehensive application for water network analysis using:
-- Machine Learning (XGBoost)
-- Particle Swarm Optimization (PSO)
-- Hydraulic Simulation
-Features:
-- Advanced data preprocessing and validation
-- Hyperparameter optimization
-- Hydraulic simulation with INP file generation
-- Comprehensive visualization
-Version: 4.0
-Author: Water Network Team
-License: MIT"""
-        
-        messagebox.showinfo("About", about_text)
+        toolbar = NavigationToolbar2Tk(canvas, window)
+        toolbar.update()
 
-def main():
-    """Main entry point for the application"""
+        def save_plot() -> None:
+            path = filedialog.asksaveasfilename(
+                parent=window,
+                defaultextension=".png",
+                filetypes=[("PNG", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg")],
+            )
+            if path:
+                fig.savefig(path, dpi=300, bbox_inches="tight")
+
+        ttk.Button(window, text="Save Plot", command=save_plot).pack(pady=6)
+
+        def close() -> None:
+            plt.close(fig)
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", close)
+
+    # --------------------------- misc ---------------------------
+
+    def show_about(self) -> None:
+        messagebox.showinfo(
+            "About",
+            "Water Network AI Analyzer v5.0\n\n"
+            "Leakage-safe XGBoost regression\n"
+            "Data-driven PRV optimization with PSO\n"
+            "Critical-point prediction\n"
+            "Optional real WNTR/EPANET simulation\n\n"
+            "PSO is explicitly a learned surrogate optimizer and is not presented as a hydraulic solver.",
+        )
+
+    def _on_close(self) -> None:
+        if self._working:
+            if not messagebox.askyesno("Exit", "An operation is running. Exit anyway?"):
+                return
+        plt.close("all")
+        self.root.destroy()
+
+
+# -----------------------------------------------------------------------------
+# CLI smoke-test helper (useful for CI and GitHub Actions)
+# -----------------------------------------------------------------------------
+
+def run_headless_smoke_test() -> int:
+    """Train the core ML/PSO services on deterministic synthetic data."""
+    rng = np.random.default_rng(42)
+    n = 120
+    prv1 = rng.uniform(22, 48, n)
+    prv2 = rng.uniform(20, 45, n)
+    demand = rng.uniform(5, 25, n)
+    down1 = 0.55 * prv1 + 0.20 * prv2 - 0.22 * demand + rng.normal(0, 0.6, n)
+    down2 = 0.25 * prv1 + 0.65 * prv2 - 0.18 * demand + rng.normal(0, 0.6, n)
+    crit1 = 0.58 * down1 + 0.35 * down2 - 0.08 * demand + rng.normal(0, 0.45, n)
+    crit2 = 0.30 * down1 + 0.62 * down2 - 0.05 * demand + rng.normal(0, 0.45, n)
+
+    df = pd.DataFrame(
+        {
+            "PRV-1": prv1,
+            "PRV-2": prv2,
+            "J-101-B": down1,
+            "J-102-B": down2,
+            "P-676": demand,
+            "J-201": crit1,
+            "J-202": crit2,
+        }
+    )
+    # Explicitly test missing values and an extreme feature outlier.
+    df.loc[3, "J-101-B"] = np.nan
+    df.loc[7, "P-676"] = np.nan
+    df.loc[10, "PRV-1"] = 500.0
+
+    config = AppConfig(search_iterations=2, cv_folds=3, pso_particles=8, pso_iterations=8)
+    schema = SchemaDetector.detect(df)
+    assert len(schema.prv_columns) == 2
+    assert len(schema.point_after_valve_columns) == 2
+    assert len(schema.critical_point_columns) == 2
+    assert schema.demand_column == "P-676"
+
+    critical = XGBoostRegressionService(config)
+    result = critical.train(
+        df,
+        schema.point_after_valve_columns + [schema.demand_column],  # type: ignore[list-item]
+        schema.critical_point_columns,
+        tune=True,
+    )
+    assert np.isfinite(result.metrics["RMSE"])
+
+    downstream = XGBoostRegressionService(config)
+    downstream.train(
+        df,
+        schema.prv_columns + [schema.demand_column],  # type: ignore[list-item]
+        schema.point_after_valve_columns,
+        tune=True,
+    )
+
+    def predictor(settings_matrix: np.ndarray, d: float) -> np.ndarray:
+        settings_matrix = np.atleast_2d(np.asarray(settings_matrix, dtype=float))
+        frame = pd.DataFrame(settings_matrix, columns=schema.prv_columns)
+        frame[schema.demand_column] = d  # type: ignore[index]
+        return downstream.predict_frame(frame).to_numpy(dtype=float)
+
+    def critical_predictor(downstream_matrix: np.ndarray, d: float) -> np.ndarray:
+        downstream_matrix = np.atleast_2d(np.asarray(downstream_matrix, dtype=float))
+        frame = pd.DataFrame(downstream_matrix, columns=schema.point_after_valve_columns)
+        frame[schema.demand_column] = d  # type: ignore[index]
+        return critical.predict_frame(frame).to_numpy(dtype=float)
+
+    optimizer = SurrogatePSOOptimizer(config)
+    settings, pressures, score, history = optimizer.optimize_hour(
+        demand=float(np.nanmedian(demand)),
+        prv_bounds=[(20.0, 50.0), (18.0, 48.0)],
+        downstream_predictor=predictor,
+        critical_predictor=critical_predictor,
+    )
+    assert settings.shape == (2,)
+    assert pressures.shape == (2,)
+    assert np.isfinite(score)
+    assert len(history) == config.pso_iterations + 1
+
+    print("SMOKE TEST PASSED")
+    print(f"Critical model RMSE: {result.metrics['RMSE']:.4f}")
+    print(f"Critical model R2:   {result.metrics['R2']:.4f}")
+    print(f"PSO score:           {score:.4f}")
+    return 0
+
+
+def main() -> int:
+    if "--smoke-test" in sys.argv:
+        return run_headless_smoke_test()
+
     root = tk.Tk()
-    app = WaterNetworkGUI(root)
+    WaterNetworkApp(root)
     root.mainloop()
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
