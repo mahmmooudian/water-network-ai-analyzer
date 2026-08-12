@@ -1,6 +1,7 @@
 numpy
 pandas
-xgboost
-scikit-learn
 matplotlib
-seaborn
+scikit-learn
+xgboost
+joblib
+wntr
