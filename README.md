@@ -1,200 +1,202 @@
-# 💧 Water Network AI Analyzer
+<div align="center">
+
+# Water Network AI Analyzer
 
 ### Leakage-Safe Machine Learning & PRV Optimization for Water Distribution Networks
 
-**Water Network AI Analyzer** is a desktop-based Industrial AI application for analyzing water-distribution data, predicting critical-point pressures, and optimizing Pressure Reducing Valve (PRV) settings using **XGBoost**, **Particle Swarm Optimization (PSO)**, and optional **WNTR / EPANET hydraulic simulation**.
+**Industrial AI · XGBoost · Particle Swarm Optimization · WNTR / EPANET · Engineering Analytics**
 
-The project focuses on combining **data-driven machine learning**, **optimization**, and **engineering analytics** while maintaining a clear distinction between learned surrogate models and physics-based hydraulic simulation.
+An applied AI platform for **water-distribution analysis, critical-pressure prediction, and PRV optimization**, combining data-driven machine learning with optional physics-based hydraulic simulation.
 
----
+[Overview](#overview) • [Architecture](#high-level-architecture) • [ML Pipeline](#leakage-safe-machine-learning) • [Optimization](#prv-optimization) • [Quick Start](#quick-start) • [Technology](#technology-stack)
 
-## 🚀 Key Features
-
-### 🤖 Machine Learning
-
-* XGBoost regression
-* Single-output and multi-output regression
-* Leakage-safe preprocessing
-* KNN missing-value imputation
-* Fold-local IQR outlier clipping
-* Automated hyperparameter optimization
-* RandomizedSearchCV
-* Hold-out model evaluation
-* Feature importance analysis
-* Model persistence with Joblib
-
-### ⚡ PRV Optimization
-
-* Particle Swarm Optimization
-* Data-driven PRV optimization
-* Automatic PRV detection from dataset
-* Dataset-derived PRV operating bounds
-* Sequential multi-hour optimization
-* Pressure constraint penalties
-* Stability-aware optimization
-* Reference-setting penalties
-* PSO convergence analysis
-
-### 💧 Hydraulic Analysis
-
-* Optional WNTR integration
-* Real EPANET `.inp` file loading
-* EPANET hydraulic simulation through WNTR
-* Pressure simulation for selected network nodes
-* Hydraulic pressure visualization
-
-### 📊 Desktop Analytics
-
-* Interactive Tkinter GUI
-* CSV dataset loading
-* Editable data table
-* Automatic schema detection
-* Model training interface
-* Critical-pressure prediction
-* Feature-importance visualization
-* Actual-vs-predicted plots
-* PSO result visualization
-* Optimization-result export
-* Model save/load
-* Application logging
+</div>
 
 ---
 
-# 🎯 Project Objective
+## Overview
 
-Water distribution systems operate under continuously changing conditions caused by:
+**Water Network AI Analyzer** is a desktop-based Industrial AI application designed to support analysis and operational decision-making in water-distribution systems.
 
-* Variable consumer demand
-* Pressure changes
-* Valve configurations
-* Network topology
-* Operational constraints
+The platform combines:
 
-Determining appropriate PRV settings manually can become difficult as system complexity increases.
+- Machine-learning-based pressure prediction
+- Leakage-safe preprocessing
+- Multi-output XGBoost regression
+- PRV optimization with Particle Swarm Optimization
+- Data-driven surrogate modeling
+- WNTR / EPANET hydraulic simulation
+- Engineering-oriented visualization
+- Interactive desktop analytics
 
-This project investigates how **machine learning and optimization algorithms** can support engineering decision-making by learning pressure relationships from historical operational data and searching for improved PRV configurations.
+The project intentionally separates two different analytical approaches:
 
-The system follows two complementary approaches:
+**Data-Driven AI**  
+Historical network measurements are used to train predictive surrogate models and optimize PRV settings.
 
-### Data-Driven AI
+**Physics-Based Simulation**  
+When an EPANET network model is available, WNTR provides an independent hydraulic-simulation workflow.
 
-Historical network measurements are used to train predictive models.
-
-### Physics-Based Simulation
-
-When a real EPANET `.inp` model is available, WNTR can execute hydraulic simulation independently from the ML optimization pipeline.
+This distinction prevents surrogate-model predictions from being presented as direct hydraulic simulation results.
 
 ---
 
-# 🧠 System Architecture
+## Key Capabilities
 
-```text
-                    WATER NETWORK DATA
-                           │
-                           ▼
-                 ┌──────────────────┐
-                 │ Schema Detection │
-                 └────────┬─────────┘
-                          │
-          ┌───────────────┴────────────────┐
-          │                                │
-          ▼                                ▼
-   Machine Learning                  PRV Optimization
-          │                                │
-          ▼                                ▼
- Train/Test Split                Historical PRV Settings
-          │                           + Demand
-          ▼                                │
- Leakage-Safe Pipeline                   ▼
-          │                       Downstream Surrogate
-    ┌─────┴─────┐                          │
-    │           │                          ▼
-    ▼           ▼                    Particle Swarm
-KNN Imputer  IQR Clipper              Optimization
-    │           │                          │
-    └─────┬─────┘                          ▼
-          │                      Optimized PRV Settings
-          ▼                                │
-       XGBoost                             ▼
-          │                     Predicted Downstream
-          ▼                            Pressure
-Critical-Point Prediction                  │
-          │                                ▼
-          └───────────────► Critical-Point Prediction
-                                           │
-                                           ▼
-                                  Engineering Analysis
+### Machine Learning
+
+- XGBoost regression
+- Single-output and multi-output prediction
+- Leakage-safe preprocessing
+- KNN missing-value imputation
+- Fold-local IQR outlier clipping
+- Randomized hyperparameter search
+- Cross-validation
+- Hold-out evaluation
+- Feature-importance analysis
+- Model persistence with Joblib
+
+### PRV Optimization
+
+- Particle Swarm Optimization
+- Automatic PRV detection
+- Dataset-derived operating bounds
+- Sequential multi-period optimization
+- Pressure-constraint penalties
+- Target-pressure optimization
+- Stability-aware control penalties
+- Historical-reference penalties
+- PSO convergence analysis
+
+### Hydraulic Analysis
+
+- WNTR integration
+- EPANET `.inp` model loading
+- EPANET simulation through WNTR
+- Node-pressure analysis
+- Hydraulic-pressure visualization
+
+### Desktop Analytics
+
+- Tkinter-based interface
+- CSV data loading
+- Automatic schema detection
+- Editable data tables
+- Model-training interface
+- Critical-pressure prediction
+- Actual-vs-predicted visualization
+- Feature-importance visualization
+- Optimization-result visualization
+- Model save / load
+- CSV export
+- Application logging
+
+---
+
+# High-Level Architecture
+
+```mermaid
+flowchart TD
+    A[Water Network Data] --> B[Schema Detection & Validation]
+
+    B --> C[Machine Learning Pipeline]
+    B --> D[PRV Optimization Pipeline]
+
+    C --> E[Train / Test Split]
+    E --> F[Leakage-Safe Preprocessing]
+    F --> G[KNN Imputation]
+    F --> H[IQR Outlier Clipping]
+
+    G --> I[XGBoost Regression]
+    H --> I
+
+    I --> J[Critical-Point Pressure Prediction]
+    J --> K[Evaluation & Diagnostics]
+
+    D --> L[Historical PRV Settings + Demand]
+    L --> M[Downstream Pressure Surrogate]
+    M --> N[Particle Swarm Optimization]
+
+    N --> O[Optimized PRV Settings]
+    O --> P[Predicted Downstream Pressure]
+    P --> Q[Critical-Point Surrogate]
+    Q --> R[Engineering Analysis]
+
+    S[EPANET .INP Model] --> T[WNTR]
+    T --> U[EPANET Simulator]
+    U --> V[Hydraulic Pressure Results]
 ```
 
-A separate optional physics-based path is also available:
+The architecture contains two complementary but intentionally separate paths:
 
-```text
-EPANET .INP File
-      │
-      ▼
-    WNTR
-      │
-      ▼
-EPANET Simulator
-      │
-      ▼
-Hydraulic Pressure Results
+1. **Data-driven machine learning and optimization**
+2. **Physics-based hydraulic simulation**
+
+The current PSO workflow operates on learned surrogate models rather than repeatedly invoking EPANET during every optimization iteration.
+
+---
+
+## Engineering Workflow
+
+```mermaid
+flowchart LR
+    A[Load Dataset] --> B[Detect Schema]
+    B --> C[Validate Data]
+    C --> D[Train Critical-Point Model]
+    D --> E[Evaluate Model]
+    E --> F[Analyze Feature Importance]
+    F --> G[Train Downstream Surrogate]
+    G --> H[Run PSO]
+    H --> I[Analyze PRV Settings]
+    I --> J[Export Results]
+```
+
+For physics-based analysis:
+
+```mermaid
+flowchart LR
+    A[EPANET INP Model] --> B[WNTR Network Model]
+    B --> C[EPANET Simulator]
+    C --> D[Node Pressure Results]
+    D --> E[Visualization]
 ```
 
 ---
 
-# 🔒 Leakage-Safe Machine Learning Pipeline
+# Leakage-Safe Machine Learning
 
-One of the main design improvements in the current version is preventing preprocessing leakage.
+Preventing information leakage is a core design principle of the project.
 
-The workflow is:
+The machine-learning workflow follows:
 
-```text
-Raw Dataset
-     │
-     ▼
-Schema Validation
-     │
-     ▼
-Remove Rows with Missing Targets
-     │
-     ▼
-Train / Test Split
-     │
-     ▼
-scikit-learn Pipeline
-     │
-     ├── KNNImputer
-     │
-     ├── IQRClipper
-     │
-     └── XGBoost
-     │
-     ▼
-Cross Validation
-     │
-     ▼
-Hyperparameter Search
-     │
-     ▼
-Hold-Out Evaluation
+```mermaid
+flowchart TD
+    A[Raw Dataset] --> B[Schema Validation]
+    B --> C[Remove Rows with Missing Targets]
+    C --> D[Train / Test Split]
+
+    D --> E[Scikit-learn Pipeline]
+
+    E --> F[KNN Imputer]
+    E --> G[IQR Clipper]
+
+    F --> H[XGBoost]
+    G --> H
+
+    H --> I[Cross-Validation]
+    I --> J[Hyperparameter Search]
+    J --> K[Hold-Out Evaluation]
 ```
 
-Preprocessing components are fitted only on the appropriate training data.
+Preprocessing components are fitted only on the relevant training data.
 
-This prevents information from the hold-out test set from influencing model preprocessing.
-
-### Why No StandardScaler?
-
-XGBoost is based on decision trees and does not require feature normalization in the same way that distance-based or gradient-based models often do.
-
-For this reason, unnecessary feature scaling was removed from the pipeline.
+This prevents information from the hold-out test set from influencing imputation, outlier limits, or model training.
 
 ---
 
-# 🧹 Data Preprocessing
+## Data Preprocessing
 
-## KNN Imputation
+### KNN Imputation
 
 Missing feature values are handled using:
 
@@ -205,21 +207,15 @@ KNNImputer(
 )
 ```
 
-The imputer is contained inside the sklearn Pipeline.
+The imputer is part of the machine-learning pipeline.
 
-Target values are **never imputed**, because generating artificial target labels could compromise model evaluation.
+Target variables are not imputed because artificially generated targets could compromise model evaluation.
 
 ---
 
-## IQR Outlier Handling
+### IQR Outlier Handling
 
-The application includes a custom sklearn-compatible transformer:
-
-```text
-IQRClipper
-```
-
-It estimates the Interquartile Range only from training data and clips extreme feature values using learned limits.
+The project uses a custom scikit-learn-compatible **IQRClipper**.
 
 Conceptually:
 
@@ -228,57 +224,53 @@ Lower Bound = Q1 - 1.5 × IQR
 Upper Bound = Q3 + 1.5 × IQR
 ```
 
-Because the transformer is inside the Pipeline, the outlier limits are recalculated independently inside cross-validation folds.
+The clipping limits are learned from training data.
+
+When cross-validation is performed, these limits are recalculated independently within each training fold.
 
 ---
 
-# 🤖 Machine Learning Model
+### Why No StandardScaler?
 
-The main predictive model is:
+XGBoost is based on decision trees and does not require feature normalization in the same way as many distance-based or gradient-based models.
+
+Unnecessary scaling is therefore excluded from the default pipeline.
+
+---
+
+## Predictive Modeling
+
+The primary predictive model is:
 
 **XGBoost Regressor**
 
-The application supports both:
+The application supports:
 
-```text
-Single Target
-```
+- Single-target regression
+- Multi-output regression
 
-and:
-
-```text
-Multiple Critical Points
-```
-
-For multiple targets the application uses:
+For multiple critical-point targets:
 
 ```python
-MultiOutputRegressor(XGBRegressor(...))
+MultiOutputRegressor(
+    XGBRegressor(...)
+)
+```
+
+The critical-point model learns relationships between downstream pressure, network demand, and target pressure locations.
+
+Conceptually:
+
+```mermaid
+flowchart LR
+    A[Downstream Pressure] --> C[XGBoost]
+    B[Network Demand] --> C
+    C --> D[Critical-Point Pressure]
 ```
 
 ---
 
-# 🎯 Critical-Point Prediction
-
-The critical-point model learns the relationship:
-
-```text
-Downstream Pressure
-        +
-Network Demand
-        │
-        ▼
-     XGBoost
-        │
-        ▼
-Critical-Point Pressure
-```
-
-This allows several critical network locations to be predicted simultaneously.
-
----
-
-# 🔧 Hyperparameter Optimization
+## Hyperparameter Optimization
 
 Model tuning is performed using:
 
@@ -286,157 +278,112 @@ Model tuning is performed using:
 RandomizedSearchCV
 ```
 
-The search space includes:
+The search space includes parameters such as:
 
-* Number of estimators
-* Maximum tree depth
-* Learning rate
-* Subsample ratio
-* Column sampling
-* Minimum child weight
-* L1 regularization
-* L2 regularization
+- Number of estimators
+- Tree depth
+- Learning rate
+- Subsample ratio
+- Column sampling
+- Minimum child weight
+- L1 regularization
+- L2 regularization
 
-Cross-validation uses shuffled K-Fold splitting with a fixed random seed for reproducibility.
-
----
-
-# 📊 Evaluation Metrics
-
-The application calculates:
-
-### Mean Absolute Error
-
-```text
-MAE
-```
-
-### Root Mean Squared Error
-
-```text
-RMSE
-```
-
-### Coefficient of Determination
-
-```text
-R²
-```
-
-### Mean Absolute Percentage Error
-
-```text
-MAPE
-```
-
-Metrics are calculated both globally and separately for individual target variables when using multi-output regression.
+Cross-validation uses shuffled K-Fold splitting with a fixed random seed.
 
 ---
 
-# 📈 Model Diagnostics
+## Model Evaluation
 
-The GUI provides:
+Regression performance is evaluated using:
 
-* Actual vs Predicted visualization
-* Feature Importance
-* Per-target evaluation
-* Best hyperparameters
-* Training duration
-* Cross-validation result
-* Hold-out metrics
+| Metric | Purpose |
+|---|---|
+| **MAE** | Mean absolute prediction error |
+| **RMSE** | Error magnitude with stronger penalty for large errors |
+| **R²** | Explained variance / goodness of fit |
+| **MAPE** | Relative percentage error |
+
+For multi-output regression, metrics can be analyzed both globally and per target.
+
+Additional diagnostics include:
+
+- Actual vs. predicted plots
+- Feature importance
+- Per-target evaluation
+- Best hyperparameters
+- Training duration
+- Cross-validation results
+- Hold-out metrics
 
 ---
 
-# ⚡ Particle Swarm Optimization
+# PRV Optimization
 
-The project uses **Particle Swarm Optimization (PSO)** to search for PRV configurations.
+The project uses **Particle Swarm Optimization (PSO)** to search for improved Pressure Reducing Valve configurations.
 
-Importantly:
+> **Important:** The PSO component is a data-driven surrogate optimizer. It is not presented as a hydraulic solver.
 
-> The PSO module is a data-driven surrogate optimizer and is not presented as a hydraulic solver.
+The optimization environment uses two learned relationships.
 
 ---
 
-## Surrogate Model A
+## Downstream Pressure Surrogate
 
-The first learned relationship is:
-
-```text
-PRV Settings + Demand
-          │
-          ▼
-       XGBoost
-          │
-          ▼
-Downstream Pressure
+```mermaid
+flowchart LR
+    A[PRV Settings] --> C[XGBoost Surrogate]
+    B[Demand] --> C
+    C --> D[Predicted Downstream Pressure]
 ```
 
-Historical PRV operation is therefore used to learn how changes in PRV settings relate to downstream pressure.
+Historical valve operation is used to learn how PRV settings and demand relate to downstream pressure.
 
 ---
 
-## Surrogate Model B
+## Critical-Point Surrogate
 
-A second model learns:
-
-```text
-Downstream Pressure + Demand
-             │
-             ▼
-          XGBoost
-             │
-             ▼
-    Critical-Point Pressure
+```mermaid
+flowchart LR
+    A[Predicted Downstream Pressure] --> C[XGBoost]
+    B[Demand] --> C
+    C --> D[Predicted Critical-Point Pressure]
 ```
 
-Together these two models provide the predictive environment used by PSO.
+Together, these surrogate models provide the predictive environment used by PSO.
 
 ---
 
-# 🐝 PSO Workflow
+## PSO Workflow
 
-For each optimization period:
+```mermaid
+flowchart TD
+    A[Initialize Particle Population] --> B[Candidate PRV Settings]
 
-```text
-Initialize Particle Population
-            │
-            ▼
-Candidate PRV Settings
-            │
-            ▼
-Downstream Surrogate Model
-            │
-            ▼
-Predicted Downstream Pressure
-            │
-            ▼
-Critical-Point Surrogate
-            │
-            ▼
-Predicted Critical Pressure
-            │
-            ▼
-Objective Function
-            │
-            ▼
-Update Particle Velocity
-            │
-            ▼
-Update Particle Position
-            │
-            ▼
-Repeat Until Convergence
+    B --> C[Downstream Pressure Surrogate]
+    C --> D[Predicted Downstream Pressure]
+
+    D --> E[Critical-Point Surrogate]
+    E --> F[Predicted Critical Pressure]
+
+    F --> G[Objective Function]
+    G --> H[Update Particle Velocity]
+    H --> I[Update Particle Position]
+
+    I --> J{Converged?}
+    J -- No --> B
+    J -- Yes --> K[Optimized PRV Configuration]
 ```
 
 ---
 
-# 🎯 Optimization Objective
+## Optimization Objective
 
-The optimization score combines several engineering considerations.
+The objective function combines several engineering considerations.
 
-### Pressure Constraint Penalty
+### Pressure Constraints
 
-Large penalties are applied when predicted pressure exceeds operational limits.
+Large penalties are applied when predicted pressures violate configured operating limits.
 
 Default pressure range:
 
@@ -444,9 +391,9 @@ Default pressure range:
 10 ≤ Pressure ≤ 60
 ```
 
-### Pressure Target
+### Target Pressure
 
-The optimizer encourages pressures toward a desired operating region.
+The optimizer encourages pressure toward a desired operating region.
 
 Default target:
 
@@ -458,39 +405,37 @@ Default target:
 
 Large PRV-setting changes between sequential periods are penalized.
 
-This helps prevent unrealistic control strategies.
+This discourages unstable or unrealistic control behavior.
 
 ### Historical Reference Penalty
 
-The optimizer also considers historical PRV settings, discouraging unnecessarily large deviations from previously observed operation.
+Candidate settings can also be penalized for excessive deviation from historically observed PRV configurations.
+
+This helps keep optimized settings closer to realistic operating regions.
 
 ---
 
-# 🔎 Automatic PRV Detection
+## Automatic PRV Detection
 
-The previous implementation used the number of PSO configuration parameters as a proxy for the number of PRVs.
+PRV variables are detected directly from the loaded dataset rather than inferred from a fixed configuration count.
 
-That behavior has been removed.
-
-The current system detects PRV variables directly from the dataset.
-
-The number of optimization variables therefore corresponds to the **actual PRV columns available in the loaded network data**.
+The dimensionality of the optimization problem therefore reflects the actual valve-setting columns available in the data.
 
 ---
 
-# 📏 PRV Bounds
+## Data-Driven PRV Bounds
 
-PRV bounds are derived from historical values in the loaded dataset.
+Optimization bounds are derived from historical PRV values.
 
-The application calculates approximate lower and upper operating ranges from historical quantiles and limits them using configured safety bounds.
+Approximate lower and upper ranges are estimated from the observed data and constrained by configured safety limits.
 
-This produces more realistic optimization ranges than applying the same arbitrary bounds to every valve.
+This provides more realistic search ranges than applying identical arbitrary bounds to every valve.
 
 ---
 
-# ⏱ Sequential Optimization
+## Sequential Optimization
 
-The application supports optimization across consecutive network observations.
+The system supports optimization across consecutive observations.
 
 By default, up to:
 
@@ -498,57 +443,51 @@ By default, up to:
 24 periods
 ```
 
-can be optimized in sequence.
+can be optimized sequentially.
 
-The user can select the number of periods directly from the GUI.
-
-The previous period's optimized PRV configuration is used when calculating the stability penalty for the next period.
+The optimized PRV configuration from the previous period can be used when computing the stability penalty for the next period.
 
 ---
 
-# 🌊 WNTR / EPANET Integration
+# WNTR / EPANET Integration
 
-The application also includes an optional physics-based hydraulic simulation path.
+The project also provides an optional physics-based hydraulic-analysis path.
 
-When `wntr` is installed, the user can load a real:
+When WNTR is installed, an EPANET:
 
 ```text
 *.inp
 ```
 
-EPANET network file.
-
-The application then uses:
+network model can be loaded using:
 
 ```python
 wntr.network.WaterNetworkModel(...)
 ```
 
-and:
+and simulated using:
 
 ```python
 wntr.sim.EpanetSimulator(...)
 ```
 
-to execute hydraulic simulation.
+The resulting node pressures can then be analyzed and visualized.
 
-Pressure results can then be visualized inside the application.
+### Important Architectural Distinction
 
-### Important
+The WNTR / EPANET simulation path and the data-driven PSO workflow currently operate independently.
 
-The WNTR hydraulic simulator and data-driven PSO optimizer currently operate as separate analysis paths.
+The optimizer does **not** repeatedly execute EPANET inside each PSO iteration.
 
-The current PSO implementation does **not** repeatedly call EPANET during every optimization iteration.
-
-This distinction is intentional and avoids presenting the surrogate optimizer as a full hydraulic optimization engine.
+This separation is intentional and avoids presenting the surrogate optimizer as a full physics-based hydraulic optimization engine.
 
 ---
 
-# 🗂 Expected Dataset Schema
+## Expected Dataset Schema
 
 The application automatically attempts to detect semantic column groups.
 
-## PRV Columns
+### PRV Columns
 
 Examples:
 
@@ -558,13 +497,13 @@ PRV_01
 PRV_Setting_1
 ```
 
-Columns containing `PRV` are interpreted as valve-setting variables unless they appear to represent identifiers or status fields.
+Columns containing `PRV` can be interpreted as valve-setting variables unless they represent identifiers or status fields.
 
 ---
 
-## Downstream / Point-After-Valve Columns
+### Downstream Pressure Columns
 
-Supported naming patterns include:
+Supported patterns include:
 
 ```text
 *-B
@@ -584,7 +523,7 @@ Downstream_1
 
 ---
 
-## Critical Points
+### Critical Points
 
 Supported patterns include:
 
@@ -604,9 +543,9 @@ Critical_Point_1
 
 ---
 
-## Demand
+### Demand
 
-The application recognizes names such as:
+Recognized naming conventions include:
 
 ```text
 P-676
@@ -616,93 +555,74 @@ Flow
 Total_Demand
 ```
 
-The legacy `P-676` naming convention is supported for compatibility with the original project dataset.
+The legacy `P-676` convention is retained for compatibility with the original project dataset.
 
 ---
 
-# 🖥 Desktop Application
+## Desktop Application
 
-The GUI provides dedicated areas for:
+The desktop interface provides dedicated workflows for data, modeling, optimization, and hydraulic analysis.
 
 ### Data
 
-* Load CSV
-* Inspect detected schema
-* Browse records
-* Edit cells
-* Save modified datasets
+- Load CSV datasets
+- Inspect detected schema
+- Browse records
+- Edit cells
+- Save modified datasets
 
 ### Machine Learning
 
-* Train critical-point model
-* View evaluation metrics
-* Inspect per-target performance
-* View feature importance
-* Visualize actual vs predicted values
-* Make manual predictions
-* Save model
-* Load model
+- Train critical-point models
+- Review evaluation metrics
+- Inspect per-target performance
+- Analyze feature importance
+- Visualize actual vs. predicted values
+- Perform manual predictions
+- Save trained models
+- Load saved models
 
 ### Optimization
 
-* Train downstream surrogate
-* Run PSO
-* Select optimization horizon
-* Inspect optimized PRV settings
-* Analyze predicted pressures
-* View convergence curves
-* Export optimization results
+- Train downstream surrogate models
+- Run PSO
+- Select optimization horizon
+- Inspect optimized PRV settings
+- Analyze predicted pressures
+- View convergence behavior
+- Export optimization results
 
 ### Hydraulic Simulation
 
-* Load EPANET INP files
-* Run WNTR / EPANET simulation
-* Visualize node-pressure results
+- Load EPANET `.inp` files
+- Run WNTR / EPANET simulation
+- Visualize node-pressure results
 
 ---
 
-# 📁 Project Structure
+# Quick Start
 
-```text
-water-network-ai-analyzer/
-│
-├── main.py
-├── requirements.txt
-├── README.md
-├── LICENSE
-├── .gitignore
-│
-├── data/
-│
-├── docs/
-│   ├── architecture.md
-│   └── methodology.md
-│
-└── results/
-```
-
-> The application is currently implemented as a consolidated desktop application. Modularization into a dedicated `src/` package is planned as part of the next software-engineering stage.
-
----
-
-# 🚀 Installation
-
-## 1. Clone Repository
+## 1. Clone the Repository
 
 ```bash
 git clone https://github.com/mahmmooudian/water-network-ai-analyzer.git
 cd water-network-ai-analyzer
 ```
 
----
+## 2. Create a Virtual Environment
 
-## 2. Create Virtual Environment
-
-### Windows
+### Windows PowerShell
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\Activate.ps1
+```
+
+### Windows Command Prompt
+
+```cmd
+python -m venv .venv
+.venv\Scripts\activate.bat
 ```
 
 ### Linux / macOS
@@ -712,20 +632,18 @@ python3 -m venv .venv
 source .venv/bin/activate
 ```
 
----
-
 ## 3. Install Dependencies
 
 ```bash
-pip install --upgrade pip
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
 ---
 
-# 🧪 Smoke Test
+## Smoke Test
 
-Before launching the GUI, the complete core pipeline can be tested using:
+Before launching the desktop application, the core workflow can be validated using:
 
 ```bash
 python main.py --smoke-test
@@ -737,27 +655,23 @@ A successful run ends with:
 SMOKE TEST PASSED
 ```
 
-The smoke test validates:
+The smoke test validates core functionality including:
 
-* Missing-value handling
-* Outlier handling
-* XGBoost training
-* Multi-output prediction
-* Leakage-safe preprocessing
-* Surrogate pressure prediction
-* PSO execution
+- Missing-value handling
+- Outlier handling
+- XGBoost training
+- Multi-output prediction
+- Leakage-safe preprocessing
+- Surrogate pressure prediction
+- PSO execution
 
-### Important
-
-The smoke-test dataset is synthetic and is intended for software validation only.
-
-Its accuracy metrics must **not** be interpreted as real-world hydraulic model performance.
+> The smoke-test dataset is synthetic and is intended for software validation only. Its metrics must not be interpreted as real-world hydraulic performance.
 
 ---
 
-# ▶️ Run Application
+## Run the Application
 
-Launch the desktop application with:
+Launch the desktop interface with:
 
 ```bash
 python main.py
@@ -765,64 +679,58 @@ python main.py
 
 ---
 
-# 🔬 Typical Workflow
+## Typical Workflow
 
-```text
-1. Load water-network CSV
-        ↓
-2. Review automatically detected schema
-        ↓
-3. Train critical-point model
-        ↓
-4. Review evaluation metrics
-        ↓
-5. Analyze feature importance
-        ↓
-6. Generate predictions
-        ↓
-7. Run surrogate PSO optimization
-        ↓
-8. Analyze optimized PRV settings
-        ↓
-9. Export optimization results
+```mermaid
+flowchart TD
+    A[Load Water-Network CSV] --> B[Review Detected Schema]
+    B --> C[Train Critical-Point Model]
+    C --> D[Review Evaluation Metrics]
+    D --> E[Analyze Feature Importance]
+    E --> F[Generate Predictions]
+    F --> G[Train Optimization Surrogate]
+    G --> H[Run PSO]
+    H --> I[Analyze Optimized PRV Settings]
+    I --> J[Export Results]
 ```
 
-For physics-based simulation:
+For physics-based analysis:
 
-```text
-Load EPANET INP
-        ↓
-Run WNTR Simulation
-        ↓
-Analyze Pressure Results
+```mermaid
+flowchart LR
+    A[Load EPANET INP] --> B[Run WNTR Simulation]
+    B --> C[Analyze Pressure Results]
 ```
 
 ---
 
-# 💾 Model Persistence
+## Model Persistence
 
-Trained models can be saved using:
+Trained models can be serialized using Joblib:
 
 ```text
 .joblib
 ```
 
-and loaded again without retraining.
+This supports:
 
-This allows experiments and trained model states to be reused between sessions.
+- Reuse of trained models
+- Separation between training and inference
+- Faster subsequent analysis
+- Repeatable experiments
 
 ---
 
-# 📤 Optimization Export
+## Optimization Export
 
 PSO results can be exported to CSV.
 
-The exported data includes information such as:
+Typical exported fields include:
 
 ```text
-Hour
+Period / Hour
 Demand
-Objective
+Objective Value
 PRV Settings
 Downstream Pressures
 Critical-Point Pressures
@@ -833,15 +741,15 @@ Maximum Pressure
 
 ---
 
-# 🧪 Reproducibility
+## Reproducibility
 
-The project uses fixed random seeds for:
+Fixed random seeds are used across major stochastic components, including:
 
-* Train/test splitting
-* Cross-validation
-* XGBoost
-* Hyperparameter search
-* PSO initialization
+- Train / test splitting
+- Cross-validation
+- XGBoost
+- Hyperparameter search
+- PSO initialization
 
 Default seed:
 
@@ -849,141 +757,181 @@ Default seed:
 42
 ```
 
-This improves experiment reproducibility.
+This improves repeatability across experiments and optimization runs.
 
 ---
 
-# ⚠️ Current Limitations
+# Technology Stack
 
-The project is an applied AI research and engineering prototype.
+| Area | Technologies |
+|---|---|
+| **Language** | Python |
+| **Machine Learning** | XGBoost, Scikit-learn |
+| **Data Processing** | Pandas, NumPy |
+| **Optimization** | Particle Swarm Optimization |
+| **Hydraulic Simulation** | WNTR, EPANET |
+| **Visualization** | Matplotlib |
+| **Desktop UI** | Tkinter |
+| **Model Persistence** | Joblib |
+| **Experiment Validation** | Smoke-test workflow |
+
+---
+
+## Project Structure
+
+```text
+water-network-ai-analyzer/
+├── data/
+├── docs/
+├── gui/
+├── hydraulics/
+├── models/
+├── optimization/
+├── results/
+├── visualization/
+│
+├── config.py
+├── main.py
+├── requirements.txt
+├── README.md
+├── LICENSE
+└── .gitignore
+```
+
+The repository separates major responsibilities into dedicated areas for:
+
+- Machine learning
+- Optimization
+- Hydraulic analysis
+- Visualization
+- GUI functionality
+- Configuration
+- Documentation
+
+`main.py` remains the primary application entry point.
+
+---
+
+## Engineering Principles
+
+The project emphasizes:
+
+- **Leakage-safe preprocessing**  
+  Training and evaluation data remain properly separated.
+
+- **Reproducibility**  
+  Major stochastic workflows use fixed seeds.
+
+- **Explicit ML / physics separation**  
+  Surrogate optimization and hydraulic simulation are clearly distinguished.
+
+- **Engineering-aware optimization**  
+  Pressure limits, stability, and historical operation influence the objective.
+
+- **Transparent evaluation**  
+  Multiple regression metrics and visual diagnostics are provided.
+
+- **Data-driven operating bounds**  
+  PRV search spaces reflect observed system behavior.
+
+- **Reusable models**  
+  Trained estimators can be saved and reloaded.
+
+- **Honest system boundaries**  
+  Experimental AI capabilities are not presented as validated hydraulic control.
+
+---
+
+## Limitations
+
+Water Network AI Analyzer is an applied AI research and engineering prototype.
 
 Current limitations include:
 
-* Performance depends strongly on the quality and coverage of historical network data.
-* Surrogate predictions should not replace engineering validation.
-* Real-world calibration is dataset-specific.
-* The PSO optimizer is data-driven rather than a direct hydraulic optimizer.
-* WNTR simulation is currently separate from the PSO inner loop.
-* Real-time SCADA / IoT ingestion is not yet implemented.
-* The desktop application is currently consolidated in a single main application file.
-* Extensive automated unit and integration testing is still planned.
+- Model performance depends on the quality and coverage of historical network data.
+- Surrogate predictions require engineering validation before operational use.
+- Model calibration is dataset-specific.
+- The PSO optimizer is data-driven rather than a direct hydraulic optimizer.
+- WNTR / EPANET simulation is currently outside the PSO inner loop.
+- Real-time SCADA / IoT ingestion is not implemented.
+- Comprehensive automated unit and integration testing remains future work.
+- The platform is not intended to autonomously control real infrastructure without additional validation, safeguards, and domain oversight.
+
+These limitations are documented explicitly to distinguish experimental decision-support capabilities from validated operational control.
 
 ---
 
-# 🛣 Roadmap
+## Roadmap
 
-Planned improvements include:
+Potential future development includes:
 
-* [ ] Modular `src/` architecture
-* [ ] Automated unit tests
-* [ ] GitHub Actions CI pipeline
-* [ ] Direct WNTR-in-the-loop optimization
-* [ ] Time-series demand forecasting
-* [ ] Leak and anomaly detection
-* [ ] Sensor / SCADA integration
-* [ ] Model monitoring
-* [ ] Experiment tracking
-* [ ] Web-based dashboard
-* [ ] Docker support
-* [ ] Benchmark datasets
-* [ ] Expanded engineering validation
-
----
-
-# 🧰 Technology Stack
-
-### Language
-
-* Python
-
-### Machine Learning
-
-* XGBoost
-* Scikit-learn
-* NumPy
-* Pandas
-
-### Optimization
-
-* Particle Swarm Optimization
-
-### Hydraulic Simulation
-
-* WNTR
-* EPANET
-
-### Visualization
-
-* Matplotlib
-
-### Desktop UI
-
-* Tkinter
-
-### Model Persistence
-
-* Joblib
+- Modularized application architecture
+- Expanded automated testing
+- GitHub Actions CI
+- Direct WNTR-in-the-loop optimization
+- Time-series demand forecasting
+- Leak and anomaly detection
+- SCADA / IoT integration
+- Model monitoring
+- Experiment tracking
+- Web-based analytics interface
+- Docker support
+- Benchmark datasets
+- Expanded hydraulic validation
 
 ---
 
-# 🧩 Engineering Principles
+## Documentation
 
-The current implementation emphasizes:
+Additional project documentation is available in:
 
-* Preventing data leakage
-* Reproducibility
-* Explicit separation of ML and hydraulic simulation
-* Honest model limitations
-* Data-driven operating bounds
-* Engineering-aware optimization
-* Clear model evaluation
-* Reusable trained models
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/methodology.md`](docs/methodology.md)
 
 ---
 
-# 📌 Project Status
+## Project Status
 
-**Active Development**
+**Active Research & Engineering Development**
 
-Current version:
+The core platform currently provides:
 
-```text
-Professional Edition v5.0
-```
+- Leakage-safe machine-learning workflows
+- Critical-pressure prediction
+- Surrogate-based PRV optimization
+- Desktop analytics
+- Model persistence
+- Engineering visualization
+- Optional WNTR / EPANET simulation
 
-The core ML pipeline, surrogate optimization system, desktop interface, model persistence, visualization tools, and optional WNTR simulation are operational.
-
-Further work is focused on software modularization, automated testing, CI/CD, and deeper hydraulic integration.
+Future development is focused on stronger software modularity, automated testing, monitoring, deployment workflows, and deeper coupling between optimization and hydraulic simulation.
 
 ---
 
-# 👨‍💻 Author
+## Author
 
 **Amir Mohammad Mahmoudian**
 
-AI/ML Engineer focused on:
+AI Engineer focused on **applied AI, machine learning, optimization, intelligent infrastructure, and ML systems**.
 
-* Machine Learning
-* Industrial AI
-* Intelligent Infrastructure
-* Optimization
-* Computer Vision
-* MLOps
-
-GitHub: [@mahmmooudian](https://github.com/mahmmooudian)
+[GitHub](https://github.com/mahmmooudian) · [LinkedIn](https://www.linkedin.com/in/amirmohmmadmahmoudian)
 
 ---
 
-# 📄 License
+## License
 
 This project is released under the **MIT License**.
 
-See the `LICENSE` file for details.
+See [`LICENSE`](LICENSE) for details.
 
 ---
 
-## ⭐ Support
+<div align="center">
 
-If you find this project useful or interesting, consider starring the repository.
+### Machine Learning × Optimization × Hydraulic Engineering
 
-Contributions, technical discussions, and suggestions are welcome.
+**Building data-driven decision-support systems for intelligent infrastructure.**
+
+If this repository supports your work or research, consider giving it a ⭐.
+
+</div>
